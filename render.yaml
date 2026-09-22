@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: vanguard-monday-invoice-api
+    runtime: node
+    region: frankfurt
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: MONDAY_API_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: MONDAY_FILES_COLUMN_ID
+        sync: false
