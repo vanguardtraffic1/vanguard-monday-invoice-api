@@ -21,7 +21,11 @@ const money = value => `£${Number(value || 0).toLocaleString('en-GB', { minimum
 const date = value => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(value);
 
 function columnText(columns, title, fallback = '') {
-  const column = columns.find(c => normalise(c.title) === normalise(title));
+  const aliases = (Array.isArray(title) ? title : [title]).map(normalise);
+  const configuredId = process.env[`SUBITEM_${aliases[0].toUpperCase()}_COLUMN_ID`];
+  const column = columns.find(c => configuredId && c.id === configuredId)
+    || columns.find(c => aliases.includes(normalise(c.title)))
+    || columns.find(c => aliases.some(alias => normalise(c.title).includes(alias)));
   return (column?.text || fallback).trim();
 }
 
@@ -56,18 +60,21 @@ async function getJob(itemId) {
   const c = addTitles(item.column_values, data.boards?.[0]?.columns);
   const subitems = item.subitems.map(subitem => {
     const sc = addTitles(subitem.column_values, subitem.board?.columns);
-    const quantity = Number(columnText(sc, 'Quantity')) || 0;
-    const unitPrice = Number(columnText(sc, 'Price').replace(/[^0-9.-]/g, '')) || 0;
-    const totalText = columnText(sc, 'Total').replace(/[^0-9.-]/g, '');
+    const quantity = Number(columnText(sc, ['Quantity', 'Qty'])) || 0;
+    const unitPrice = Number(columnText(sc, ['Price', 'Unit Price', 'Rate']).replace(/[^0-9.-]/g, '')) || 0;
+    const totalText = columnText(sc, ['Total', 'Amount']).replace(/[^0-9.-]/g, '');
     const total = Number(totalText) || quantity * unitPrice;
     return {
-      code: columnText(sc, 'Rates') || subitem.name,
-      description: columnText(sc, 'Description') || subitem.name,
+      code: columnText(sc, ['Rates', 'Rate', 'Code']) || subitem.name,
+      description: columnText(sc, ['Description', 'Details']) || subitem.name,
       quantity, unitPrice, total,
-      taxDescription: columnText(sc, 'Tax Description')
+      taxDescription: columnText(sc, ['Tax Description', 'Tax'])
     };
   }).filter(line => has(line.description) && line.total >= 0);
   if (!subitems.length) throw new Error('No invoiceable subitems were found.');
+  if (subitems.every(line => line.total === 0)) {
+    throw new Error('All invoice line totals are £0. Check that each subitem has Quantity and Price/Total populated, then confirm their column titles are Quantity, Price and Total.');
+  }
   const customers = c.filter(x => normalise(x.title) === 'customer').map(x => x.text).filter(has);
   return {
     itemId: item.id,
@@ -78,6 +85,9 @@ async function getJob(itemId) {
     purchaseOrder: columnText(c, 'Customer PO'),
     location: columnText(c, 'Location'),
     tmRequired: columnText(c, 'TM Required'),
+    cad: columnText(c, 'CAD'),
+    permits: columnText(c, ['Permit Support', 'Permits']),
+    delivery: columnText(c, 'Delivery'),
     lines: subitems
   };
 }
@@ -91,17 +101,26 @@ function renderInvoice(job) {
     doc.on('error', reject);
     const subtotal = job.lines.reduce((sum, line) => sum + line.total, 0);
     const invoiceNo = process.env.INVOICE_PREFIX ? `${process.env.INVOICE_PREFIX}-${job.reference}` : job.reference;
-    const accent = '#DFFF00';
-    doc.font('Helvetica-Bold').fontSize(25).fillColor('#080808').text('INVOICE', 40, 45);
-    doc.fontSize(19).text('VANGUARD', 390, 45, { align: 'right' });
-    doc.fontSize(9).text('TRAFFIC', 390, 67, { align: 'right' });
-    doc.fillColor('#222').font('Helvetica').fontSize(10)
-      .text(process.env.COMPANY_NAME || 'Vanguard Traffic Ltd', 390, 90, { align: 'right' })
-      .text(process.env.COMPANY_ADDRESS || '66 Paul Street, London, EC2A 4NA', 390, 103, { align: 'right' })
-      .text(`Company no. ${process.env.COMPANY_NUMBER || '17462744'}`, 390, 116, { align: 'right' });
-    doc.font('Helvetica-Bold').fontSize(13).fillColor('#080808').text(job.customer, 40, 120);
-    doc.font('Helvetica').fontSize(10).text(job.customerEmail, 40, 139);
-    doc.moveTo(40, 165).lineTo(555, 165).strokeColor('#dddddd').stroke();
+    const accent = '#b9ff3e';
+    const dark = '#111111';
+    const grey = '#eeeeee';
+    const pageRight = 555;
+    const companyAddress = process.env.COMPANY_ADDRESS || '66 Paul Street, London, England, United Kingdom, EC2A 4NA';
+    const invoiceLabel = 'Invoice';
+
+    // Header, matched to the approved Vanguard document format.
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#333333').text(invoiceLabel, 40, 47);
+    doc.font('Helvetica-Bold').fontSize(24).fillColor('#000').text('VANGUARD', 378, 54, { width: 165, align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(8).characterSpacing(4).text('TRAFFIC SERVICES', 378, 80, { width: 165, align: 'right' }).characterSpacing(0);
+    [0, 1, 2].forEach((i) => doc.circle(548, 58 + i * 9, 4.2).fill(['#ef2b2d', '#f6ca16', '#20a65a'][i]));
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(dark)
+      .text(process.env.COMPANY_NAME || 'Vanguard Traffic LTD', 380, 101, { width: 175, align: 'right' });
+    doc.font('Helvetica').fontSize(9).text(companyAddress, 380, 114, { width: 175, align: 'right' });
+    doc.font('Helvetica-Bold').text(`Company number ${process.env.COMPANY_NUMBER || '17462744'}`, 380, 151, { width: 175, align: 'right' });
+
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(dark).text(job.customer, 40, 102, { width: 300 });
+    doc.font('Helvetica').fontSize(10).text(job.customerEmail, 40, 119, { width: 300 });
+    doc.fontSize(10).text(job.location || '', 40, 136, { width: 300 });
     const meta = [
       ['Invoice total', money(subtotal)], ['Issue date', date(new Date())],
       ['Works reference', job.reference], ['PO number', job.purchaseOrder || '-'], ['Invoice no.', invoiceNo]
@@ -109,39 +128,58 @@ function renderInvoice(job) {
     const width = 515 / meta.length;
     meta.forEach(([label, value], i) => {
       const x = 40 + i * width;
-      doc.rect(x, 180, width - 4, 42).fill('#f2f2f2');
-      doc.fillColor('#111').font('Helvetica-Bold').fontSize(9).text(label, x + 4, 186, { width: width - 10 });
-      doc.fontSize(11).text(value, x + 4, 201, { width: width - 10 });
+      doc.rect(x, 180, width, 17).fill(grey);
+      doc.fillColor(dark).font('Helvetica-Bold').fontSize(9).text(label, x + 2, 182, { width: width - 5 });
+      doc.fontSize(11).text(value, x + 2, 199, { width: width - 5 });
     });
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#111').text('Reference', 40, 242);
-    doc.font('Helvetica').fontSize(12).text(job.jobName, 40, 258);
-    doc.fontSize(10).text([job.tmRequired, job.location].filter(has).join('\n'), 40, 278, { width: 500 });
-    let y = 335;
-    const columns = [40, 130, 330, 390, 465];
-    doc.rect(40, y, 515, 24).fill('#777');
+    doc.rect(40, 239, 515, 16).fill(grey);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(dark).text('Reference', 42, 242);
+    doc.font('Helvetica').fontSize(11).text(job.jobName, 40, 260);
+    doc.fontSize(10).text(job.tmRequired || '', 40, 277, { width: 500 });
+
+    const serviceFlags = [
+      ['Survey', false], ['CAD', /yes|complete|done|true/i.test(job.cad || '')],
+      ['Permits', /yes|complete|done|true/i.test(job.permits || '')], ['Delivery', /yes|complete|done|true/i.test(job.delivery || '')]
+    ];
+    doc.rect(40, 316, 515, 16).fill(grey);
+    serviceFlags.forEach(([label, enabled], i) => {
+      const x = 40 + i * 128.75;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(dark).text(label, x, 318, { width: 128.75, align: 'center' });
+      doc.font('Helvetica-Bold').fontSize(14).text(enabled ? '✓' : '✕', x, 334, { width: 128.75, align: 'center' });
+    });
+
+    let y = 350;
+    const columns = [40, 122, 298, 388, 452, 510];
+    doc.rect(40, y, 515, 20).fill('#888888');
     doc.fillColor('#fff').font('Helvetica-Bold').fontSize(9);
-    ['Code', 'Description', 'Qty', 'Price', 'Amount'].forEach((heading, i) => doc.text(heading, columns[i] + 3, y + 7, { width: i === 1 ? 195 : 80, align: i > 1 ? 'right' : 'left' }));
-    y += 24;
+    ['Code', 'Description', 'Quantity', 'Price', 'Tax', 'Amount'].forEach((heading, i) => doc.text(heading, columns[i] + 2, y + 5, { width: i === 1 ? 172 : (i === 2 ? 88 : 56), align: i > 1 ? 'right' : 'left' }));
+    y += 20;
     doc.font('Helvetica').fillColor('#111');
     for (const line of job.lines) {
-      const rowHeight = Math.max(31, doc.heightOfString(line.description, { width: 190 }) + 14);
-      if (y + rowHeight > 650) { doc.addPage(); y = 60; }
+      const rowHeight = Math.max(38, doc.heightOfString(line.description, { width: 170 }) + 14);
+      if (y + rowHeight > 590) { doc.addPage(); y = 60; }
       doc.rect(40, y, 515, rowHeight).strokeColor('#ddd').stroke();
-      doc.fontSize(9).text(line.code, 43, y + 7, { width: 84 });
-      doc.text(line.description, 133, y + 7, { width: 190 });
-      doc.text(String(line.quantity), 333, y + 7, { width: 52, align: 'right' });
-      doc.text(money(line.unitPrice), 393, y + 7, { width: 68, align: 'right' });
-      doc.text(money(line.total), 468, y + 7, { width: 83, align: 'right' });
+      doc.fontSize(9).text(line.code, 42, y + 7, { width: 76 });
+      doc.text(line.description, 124, y + 7, { width: 170 });
+      doc.text(String(line.quantity), 300, y + 7, { width: 82, align: 'right' });
+      doc.text(money(line.unitPrice), 390, y + 7, { width: 58, align: 'right' });
+      doc.text(line.taxDescription || '20% *', 454, y + 7, { width: 52, align: 'right' });
+      doc.text(money(line.total), 512, y + 7, { width: 40, align: 'right' });
       y += rowHeight;
     }
-    y += 25;
-    doc.font('Helvetica').fontSize(11).text('Subtotal', 390, y, { width: 85 }).text(money(subtotal), 480, y, { width: 75, align: 'right' });
-    doc.font('Helvetica-Bold').fontSize(13).text('Total', 390, y + 26, { width: 85 }).text(money(subtotal), 480, y + 26, { width: 75, align: 'right' });
-    doc.rect(385, y + 55, 170, 34).fill(accent);
-    doc.fillColor('#111').font('Helvetica-Bold').fontSize(14).text('Invoice Total', 392, y + 65).text(money(subtotal), 470, y + 65, { width: 78, align: 'right' });
-    doc.fillColor('#333').font('Helvetica').fontSize(9)
-      .text(`Payment terms: ${process.env.PAYMENT_TERMS || '14 days from invoice date'}`, 40, 710)
-      .text(process.env.BANK_DETAILS || 'Bank details available on request.', 40, 724, { width: 300 });
+    y += 20;
+    const totalsX = 365;
+    doc.font('Helvetica').fontSize(10).text('Subtotal', totalsX, y, { width: 125 }).text(money(subtotal), 495, y, { width: 58, align: 'right' });
+    doc.text('Total Domestic Reverse\nCharge @ 20% (VAT on\nIncome)', totalsX, y + 20, { width: 125 }).text('£0.00', 495, y + 40, { width: 58, align: 'right' });
+    doc.moveTo(totalsX, y + 69).lineTo(pageRight, y + 69).strokeColor(dark).stroke();
+    doc.font('Helvetica-Bold').fontSize(11).text('Total', totalsX, y + 82).text(money(subtotal), 495, y + 82, { width: 58, align: 'right' });
+    doc.moveTo(totalsX, y + 104).lineTo(pageRight, y + 104).strokeColor(dark).stroke();
+    doc.rect(totalsX, y + 118, 190, 26).fill(accent);
+    doc.fillColor(dark).font('Helvetica-Bold').fontSize(12).text('Invoice Total', totalsX + 3, y + 125).text(money(subtotal), 495, y + 125, { width: 58, align: 'right' });
+    doc.fillColor('#555').font('Helvetica-Oblique').fontSize(8.5)
+      .text('* Domestic reverse charge (DRC) applies to items marked.\nCustomers need to account for VAT on these items to HMRC, at\n20% of the rates shown.', 40, y + 30, { width: 270 });
+    doc.fillColor(dark).font('Helvetica').fontSize(8.5)
+      .text(process.env.BANK_DETAILS || 'Bank: Tide Business Banking\nAccount Number: 33763868\nSort Code: 04-06-05\nAccount Name: Vanguard Traffic Services LTD', 40, y + 112, { width: 270 });
     doc.end();
   });
 }
