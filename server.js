@@ -37,16 +37,25 @@ async function getJob(itemId) {
   const query = `query ($ids: [ID!]) {
     items(ids: $ids) {
       id name
-      column_values { id title text value }
-      subitems { id name column_values { id title text value } }
+      column_values { id text value }
+      subitems {
+        id name
+        board { columns { id title } }
+        column_values { id text value }
+      }
     }
+    boards(ids: $ids) { columns { id title } }
   }`;
   const data = await mondayQuery(query, { ids: [String(itemId)] });
   const item = data.items?.[0];
   if (!item) throw new Error('Monday item was not found.');
-  const c = item.column_values;
+  const addTitles = (values, columns) => {
+    const titles = new Map((columns || []).map(column => [column.id, column.title]));
+    return values.map(value => ({ ...value, title: titles.get(value.id) || value.id }));
+  };
+  const c = addTitles(item.column_values, data.boards?.[0]?.columns);
   const subitems = item.subitems.map(subitem => {
-    const sc = subitem.column_values;
+    const sc = addTitles(subitem.column_values, subitem.board?.columns);
     const quantity = Number(columnText(sc, 'Quantity')) || 0;
     const unitPrice = Number(columnText(sc, 'Price').replace(/[^0-9.-]/g, '')) || 0;
     const totalText = columnText(sc, 'Total').replace(/[^0-9.-]/g, '');
