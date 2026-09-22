@@ -60,13 +60,18 @@ async function getJob(itemId) {
   const c = addTitles(item.column_values, data.boards?.[0]?.columns);
   const subitems = item.subitems.map(subitem => {
     const sc = addTitles(subitem.column_values, subitem.board?.columns);
-    const quantity = Number(columnText(sc, ['Quantity', 'Qty'])) || 0;
-    const unitPrice = Number(columnText(sc, ['Price', 'Unit Price', 'Rate']).replace(/[^0-9.-]/g, '')) || 0;
-    const totalText = columnText(sc, ['Total', 'Amount']).replace(/[^0-9.-]/g, '');
+    // Monday does not always return subitem column titles.  The first five
+    // columns on this board are deliberately Rates, Description, Quantity,
+    // Price and Total, so use their display order as a reliable fallback.
+    const ordered = subitem.column_values || [];
+    const read = (names, position) => columnText(sc, names) || ordered[position]?.text || '';
+    const quantity = Number(read(['Quantity', 'Qty'], 2)) || 0;
+    const unitPrice = Number(read(['Price', 'Unit Price', 'Rate'], 3).replace(/[^0-9.-]/g, '')) || 0;
+    const totalText = read(['Total', 'Amount'], 4).replace(/[^0-9.-]/g, '');
     const total = Number(totalText) || quantity * unitPrice;
     return {
-      code: columnText(sc, ['Rates', 'Rate', 'Code']) || subitem.name,
-      description: columnText(sc, ['Description', 'Details']) || subitem.name,
+      code: read(['Rates', 'Rate', 'Code'], 0) || subitem.name,
+      description: read(['Description', 'Details'], 1) || subitem.name,
       quantity, unitPrice, total,
       taxDescription: columnText(sc, ['Tax Description', 'Tax'])
     };
