@@ -60,18 +60,23 @@ async function getJob(itemId) {
   const c = addTitles(item.column_values, data.boards?.[0]?.columns);
   const subitems = item.subitems.map(subitem => {
     const sc = addTitles(subitem.column_values, subitem.board?.columns);
-    // Monday does not always return subitem column titles.  The first five
-    // columns on this board are deliberately Rates, Description, Quantity,
-    // Price and Total, so use their display order as a reliable fallback.
+    // Monday does not always return subitem column titles and its API column
+    // order can differ from the displayed board order. Fall back to the two
+    // non-numeric values (Rates then Description) and three numeric values
+    // (Quantity, Price, Total) wherever they occur in the returned array.
     const ordered = subitem.column_values || [];
-    const read = (names, position) => columnText(sc, names) || ordered[position]?.text || '';
-    const quantity = Number(read(['Quantity', 'Qty'], 2)) || 0;
-    const unitPrice = Number(read(['Price', 'Unit Price', 'Rate'], 3).replace(/[^0-9.-]/g, '')) || 0;
-    const totalText = read(['Total', 'Amount'], 4).replace(/[^0-9.-]/g, '');
+    const cleanNumber = value => String(value || '').replace(/[^0-9.-]/g, '');
+    const isNumber = value => /^-?\d+(?:\.\d+)?$/.test(cleanNumber(value));
+    const textValues = ordered.map(value => value.text || '').filter(value => value && !isNumber(value));
+    const numericValues = ordered.map(value => value.text || '').filter(isNumber);
+    const read = (names, fallback) => columnText(sc, names) || fallback || '';
+    const quantity = Number(read(['Quantity', 'Qty'], numericValues[0])) || 0;
+    const unitPrice = Number(cleanNumber(read(['Price', 'Unit Price', 'Rate'], numericValues[1]))) || 0;
+    const totalText = cleanNumber(read(['Total', 'Amount'], numericValues[2]));
     const total = Number(totalText) || quantity * unitPrice;
     return {
-      code: read(['Rates', 'Rate', 'Code'], 0) || subitem.name,
-      description: read(['Description', 'Details'], 1) || subitem.name,
+      code: read(['Rates', 'Rate', 'Code'], textValues[0]) || subitem.name,
+      description: read(['Description', 'Details'], textValues[1]) || subitem.name,
       quantity, unitPrice, total,
       taxDescription: columnText(sc, ['Tax Description', 'Tax'])
     };
