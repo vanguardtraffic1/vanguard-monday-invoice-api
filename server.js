@@ -1,233 +1,1043 @@
-import 'dotenv/config';
-import crypto from 'node:crypto';
-import { Readable } from 'node:stream';
-import axios from 'axios';
-import express from 'express';
-import FormData from 'form-data';
-import PDFDocument from 'pdfkit';
+const express = require("express");
+const axios = require("axios");
+const PDFDocument = require("pdfkit");
+const FormData = require("form-data");
 
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: "2mb" }));
 
-const required = ['MONDAY_API_TOKEN', 'WEBHOOK_SECRET', 'MONDAY_FILES_COLUMN_ID'];
-const mondayApi = axios.create({
-  baseURL: 'https://api.monday.com/v2',
-  headers: { Authorization: process.env.MONDAY_API_TOKEN || '' },
-  timeout: 30000
-});
+const PORT = process.env.PORT || 3000;
 
-const normalise = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-const money = value => `£${Number(value || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const date = value => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(value);
+const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-function columnText(columns, title, fallback = '') {
-  const aliases = (Array.isArray(title) ? title : [title]).map(normalise);
-  const configuredId = process.env[`SUBITEM_${aliases[0].toUpperCase()}_COLUMN_ID`];
-  const column = columns.find(c => configuredId && c.id === configuredId)
-    || columns.find(c => aliases.includes(normalise(c.title)))
-    || columns.find(c => aliases.some(alias => normalise(c.title).includes(alias)));
-  return (column?.text || fallback).trim();
+const COMPANY_NAME = process.env.COMPANY_NAME || "Vanguard Traffic Services";
+const COMPANY_ADDRESS = process.env.COMPANY_ADDRESS || "";
+const COMPANY_NUMBER = process.env.COMPANY_NUMBER || "";
+const PAYMENT_TERMS = process.env.PAYMENT_TERMS || "30 days";
+
+/*
+|--------------------------------------------------------------------------
+| JOB MASTER COLUMN IDS
+|--------------------------------------------------------------------------
+*/
+
+const BILLING_COLUMN_ID = "color_mm7e6e42";
+
+const QUOTE_FILES_COLUMN_ID = "file_mm76vz2v";
+const QUOTE_VALUE_COLUMN_ID = "numeric_mm763s6h";
+const QUOTE_SENT_COLUMN_ID = "date_mm76hsd";
+
+const INVOICE_FILES_COLUMN_ID = "file_mm76vjgd";
+const INVOICE_VALUE_COLUMN_ID = "numeric_mm76bxdf";
+const INVOICE_SENT_COLUMN_ID = "date_mm766vnc";
+
+const CUSTOMER_PO_COLUMN_ID = "text_mm77hx84";
+const OUR_REFERENCE_COLUMN_ID = "formula_mm763fdy";
+
+/*
+|--------------------------------------------------------------------------
+| SUBITEM COLUMN IDS
+|--------------------------------------------------------------------------
+*/
+
+const RATE_COLUMN_ID = "board_relation_mm76nrce";
+const DESCRIPTION_COLUMN_ID = "lookup_mm768ay6";
+const QUANTITY_COLUMN_ID = "numeric_mm76kqt5";
+const PRICE_COLUMN_ID = "lookup_mm76v66j";
+const TOTAL_COLUMN_ID = "formula_mm76er3t";
+
+/*
+|--------------------------------------------------------------------------
+| HELPERS
+|--------------------------------------------------------------------------
+*/
+
+function requireEnv() {
+  const missing = [];
+
+  if (!MONDAY_API_TOKEN) missing.push("MONDAY_API_TOKEN");
+  if (!WEBHOOK_SECRET) missing.push("WEBHOOK_SECRET");
+
+  if (missing.length) {
+    throw new Error(
+      `Missing environment variables: ${missing.join(", ")}`
+    );
+  }
 }
 
-function has(value) { return value && value.toLowerCase() !== 'null'; }
+async function mondayGraphQL(query, variables = {}) {
+  requireEnv();
 
-async function mondayQuery(query, variables) {
-  const { data } = await mondayApi.post('', { query, variables });
-  if (data.errors?.length) throw new Error(data.errors.map(e => e.message).join('; '));
-  return data.data;
+  const response = await axios.post(
+    "https://api.monday.com/v2",
+    {
+      query,
+      variables,
+    },
+    {
+      headers: {
+        Authorization: MONDAY_API_TOKEN,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (response.data.errors) {
+    throw new Error(JSON.stringify(response.data.errors));
+  }
+
+  return response.data.data;
 }
+
+function getColumn(item, columnId) {
+  return item.column_values?.find((column) => column.id === columnId);
+}
+
+function getColumnText(item, columnId) {
+  const column = getColumn(item, columnId);
+
+  if (!column) return "";
+
+  return column.text || "";
+}
+
+function money(value) {
+  const number = Number(value || 0);
+
+  return new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+  }).format(number);
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/*
+|--------------------------------------------------------------------------
+| READ MONDAY JOB
+|--------------------------------------------------------------------------
+*/
 
 async function getJob(itemId) {
-  const query = `query ($ids: [ID!]) {
-    items(ids: $ids) {
-      id name
-      column_values { id text value }
-      subitems {
-        id name
-        board { columns { id title } }
-        column_values { id text value }
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+
+        column_values {
+          id
+          text
+          value
+        }
+
+        subitems {
+          id
+          name
+
+          column_values {
+            id
+            text
+            value
+          }
+        }
       }
     }
-    boards(ids: $ids) { columns { id title } }
-  }`;
-  const data = await mondayQuery(query, { ids: [String(itemId)] });
-  const item = data.items?.[0];
-  if (!item) throw new Error('Monday item was not found.');
-  const addTitles = (values, columns) => {
-    const titles = new Map((columns || []).map(column => [column.id, column.title]));
-    return values.map(value => ({ ...value, title: titles.get(value.id) || value.id }));
-  };
-  const c = addTitles(item.column_values, data.boards?.[0]?.columns);
-  const subitems = item.subitems.map(subitem => {
-    const sc = addTitles(subitem.column_values, subitem.board?.columns);
-    // Monday does not always return subitem column titles and its API column
-    // order can differ from the displayed board order. Fall back to the two
-    // non-numeric values (Rates then Description) and three numeric values
-    // (Quantity, Price, Total) wherever they occur in the returned array.
-    const ordered = subitem.column_values || [];
-    const cleanNumber = value => String(value || '').replace(/[^0-9.-]/g, '');
-    const isNumber = value => /^-?\d+(?:\.\d+)?$/.test(cleanNumber(value));
-    const textValues = ordered.map(value => value.text || '').filter(value => value && !isNumber(value));
-    const numericValues = ordered.map(value => value.text || '').filter(isNumber);
-    const read = (names, fallback) => columnText(sc, names) || fallback || '';
-    const quantity = Number(read(['Quantity', 'Qty'], numericValues[0])) || 0;
-    const unitPrice = Number(cleanNumber(read(['Price', 'Unit Price', 'Rate'], numericValues[1]))) || 0;
-    const totalText = cleanNumber(read(['Total', 'Amount'], numericValues[2]));
-    const total = Number(totalText) || quantity * unitPrice;
-    return {
-      code: read(['Rates', 'Rate', 'Code'], textValues[0]) || subitem.name,
-      description: read(['Description', 'Details'], textValues[1]) || subitem.name,
-      quantity, unitPrice, total,
-      taxDescription: columnText(sc, ['Tax Description', 'Tax'])
-    };
-  }).filter(line => has(line.description) && line.total >= 0);
-  if (!subitems.length) throw new Error('No invoiceable subitems were found.');
-  if (subitems.every(line => line.total === 0)) {
-    throw new Error('All invoice line totals are £0. Check that each subitem has Quantity and Price/Total populated, then confirm their column titles are Quantity, Price and Total.');
+  `;
+
+  const data = await mondayGraphQL(query, {
+    itemIds: [String(itemId)],
+  });
+
+  if (!data.items || !data.items.length) {
+    throw new Error(`Monday item ${itemId} was not found.`);
   }
-  const customers = c.filter(x => normalise(x.title) === 'customer').map(x => x.text).filter(has);
+
+  return data.items[0];
+}
+
+/*
+|--------------------------------------------------------------------------
+| BUILD DOCUMENT DATA
+|--------------------------------------------------------------------------
+*/
+
+function buildDocumentData(item) {
+  const reference =
+    getColumnText(item, OUR_REFERENCE_COLUMN_ID) ||
+    item.name ||
+    item.id;
+
+  const customerPO =
+    getColumnText(item, CUSTOMER_PO_COLUMN_ID) || "";
+
+  const lines = (item.subitems || []).map((subitem) => {
+    const rate =
+      getColumnText(subitem, RATE_COLUMN_ID) ||
+      subitem.name ||
+      "";
+
+    const description =
+      getColumnText(subitem, DESCRIPTION_COLUMN_ID) || "";
+
+    const quantity =
+      Number(
+        getColumnText(subitem, QUANTITY_COLUMN_ID) || 0
+      );
+
+    const price =
+      Number(
+        String(
+          getColumnText(subitem, PRICE_COLUMN_ID) || 0
+        ).replace(/[£,]/g, "")
+      );
+
+    let total =
+      Number(
+        String(
+          getColumnText(subitem, TOTAL_COLUMN_ID) || 0
+        ).replace(/[£,]/g, "")
+      );
+
+    /*
+     * Fallback calculation in case Monday's formula text
+     * isn't returned through the API.
+     */
+    if (!total && quantity && price) {
+      total = quantity * price;
+    }
+
+    return {
+      rate,
+      description,
+      quantity,
+      price,
+      total,
+    };
+  });
+
+  const total = lines.reduce(
+    (sum, line) => sum + Number(line.total || 0),
+    0
+  );
+
   return {
     itemId: item.id,
     jobName: item.name,
-    reference: columnText(c, 'Our Reference') || item.id,
-    customer: customers.at(-1) || 'Customer to be confirmed',
-    customerEmail: columnText(c, 'Customer Email'),
-    purchaseOrder: columnText(c, 'Customer PO'),
-    location: columnText(c, 'Location'),
-    tmRequired: columnText(c, 'TM Required'),
-    cad: columnText(c, 'CAD'),
-    permits: columnText(c, ['Permit Support', 'Permits']),
-    delivery: columnText(c, 'Delivery'),
-    lines: subitems
+    reference,
+    customerPO,
+    lines,
+    total,
   };
 }
 
-function renderInvoice(job) {
+/*
+|--------------------------------------------------------------------------
+| PDF GENERATOR
+|--------------------------------------------------------------------------
+*/
+
+function renderDocument(data, documentType) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
-    const chunks = [];
-    doc.on('data', chunk => chunks.push(chunk));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
-    const subtotal = job.lines.reduce((sum, line) => sum + line.total, 0);
-    const invoiceNo = process.env.INVOICE_PREFIX ? `${process.env.INVOICE_PREFIX}-${job.reference}` : job.reference;
-    const accent = '#b9ff3e';
-    const dark = '#111111';
-    const grey = '#eeeeee';
-    const pageRight = 555;
-    const companyAddress = process.env.COMPANY_ADDRESS || '66 Paul Street, London, England, United Kingdom, EC2A 4NA';
-    const invoiceLabel = 'Invoice';
+    try {
+      const doc = new PDFDocument({
+        size: "A4",
+        margin: 45,
+      });
 
-    // Header, matched to the approved Vanguard document format.
-    doc.font('Helvetica-Bold').fontSize(22).fillColor('#333333').text(invoiceLabel, 40, 47);
-    doc.font('Helvetica-Bold').fontSize(24).fillColor('#000').text('VANGUARD', 378, 54, { width: 165, align: 'right' });
-    doc.font('Helvetica-Bold').fontSize(8).characterSpacing(4).text('TRAFFIC SERVICES', 378, 80, { width: 165, align: 'right' }).characterSpacing(0);
-    [0, 1, 2].forEach((i) => doc.circle(548, 58 + i * 9, 4.2).fill(['#ef2b2d', '#f6ca16', '#20a65a'][i]));
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(dark)
-      .text(process.env.COMPANY_NAME || 'Vanguard Traffic LTD', 380, 101, { width: 175, align: 'right' });
-    doc.font('Helvetica').fontSize(9).text(companyAddress, 380, 114, { width: 175, align: 'right' });
-    doc.font('Helvetica-Bold').text(`Company number ${process.env.COMPANY_NUMBER || '17462744'}`, 380, 151, { width: 175, align: 'right' });
+      const chunks = [];
 
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(dark).text(job.customer, 40, 102, { width: 300 });
-    doc.font('Helvetica').fontSize(10).text(job.customerEmail, 40, 119, { width: 300 });
-    doc.fontSize(10).text(job.location || '', 40, 136, { width: 300 });
-    const meta = [
-      ['Invoice total', money(subtotal)], ['Issue date', date(new Date())],
-      ['Works reference', job.reference], ['PO number', job.purchaseOrder || '-'], ['Invoice no.', invoiceNo]
-    ];
-    const width = 515 / meta.length;
-    meta.forEach(([label, value], i) => {
-      const x = 40 + i * width;
-      doc.rect(x, 180, width, 17).fill(grey);
-      doc.fillColor(dark).font('Helvetica-Bold').fontSize(9).text(label, x + 2, 182, { width: width - 5 });
-      doc.fontSize(11).text(value, x + 2, 199, { width: width - 5 });
-    });
-    doc.rect(40, 239, 515, 16).fill(grey);
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(dark).text('Reference', 42, 242);
-    doc.font('Helvetica').fontSize(11).text(job.jobName, 40, 260);
-    doc.fontSize(10).text(job.tmRequired || '', 40, 277, { width: 500 });
+      doc.on("data", (chunk) => chunks.push(chunk));
 
-    const serviceFlags = [
-      ['Survey', false], ['CAD', /yes|complete|done|true/i.test(job.cad || '')],
-      ['Permits', /yes|complete|done|true/i.test(job.permits || '')], ['Delivery', /yes|complete|done|true/i.test(job.delivery || '')]
-    ];
-    doc.rect(40, 316, 515, 16).fill(grey);
-    serviceFlags.forEach(([label, enabled], i) => {
-      const x = 40 + i * 128.75;
-      doc.font('Helvetica-Bold').fontSize(10).fillColor(dark).text(label, x, 318, { width: 128.75, align: 'center' });
-      doc.font('Helvetica-Bold').fontSize(14).text(enabled ? '✓' : '✕', x, 334, { width: 128.75, align: 'center' });
-    });
+      doc.on("end", () => {
+        resolve(Buffer.concat(chunks));
+      });
 
-    let y = 350;
-    const columns = [40, 122, 298, 388, 452, 510];
-    doc.rect(40, y, 515, 20).fill('#888888');
-    doc.fillColor('#fff').font('Helvetica-Bold').fontSize(9);
-    ['Code', 'Description', 'Quantity', 'Price', 'Tax', 'Amount'].forEach((heading, i) => doc.text(heading, columns[i] + 2, y + 5, { width: i === 1 ? 172 : (i === 2 ? 88 : 56), align: i > 1 ? 'right' : 'left' }));
-    y += 20;
-    doc.font('Helvetica').fillColor('#111');
-    for (const line of job.lines) {
-      const rowHeight = Math.max(38, doc.heightOfString(line.description, { width: 170 }) + 14);
-      if (y + rowHeight > 590) { doc.addPage(); y = 60; }
-      doc.rect(40, y, 515, rowHeight).strokeColor('#ddd').stroke();
-      doc.fontSize(9).text(line.code, 42, y + 7, { width: 76 });
-      doc.text(line.description, 124, y + 7, { width: 170 });
-      doc.text(String(line.quantity), 300, y + 7, { width: 82, align: 'right' });
-      doc.text(money(line.unitPrice), 390, y + 7, { width: 58, align: 'right' });
-      doc.text(line.taxDescription || '20% *', 454, y + 7, { width: 52, align: 'right' });
-      doc.text(money(line.total), 512, y + 7, { width: 40, align: 'right' });
-      y += rowHeight;
+      doc.on("error", reject);
+
+      const title =
+        documentType === "quote"
+          ? "QUOTATION"
+          : "INVOICE";
+
+      /*
+       * HEADER
+       */
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(22)
+        .text("VANGUARD", 45, 45);
+
+      doc
+        .font("Helvetica")
+        .fontSize(9)
+        .text(COMPANY_NAME, 45, 75);
+
+      if (COMPANY_ADDRESS) {
+        doc.text(COMPANY_ADDRESS);
+      }
+
+      if (COMPANY_NUMBER) {
+        doc.text(`Company No: ${COMPANY_NUMBER}`);
+      }
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(24)
+        .text(title, 350, 45, {
+          align: "right",
+        });
+
+      doc
+        .font("Helvetica")
+        .fontSize(10)
+        .text(
+          `Date: ${today()}`,
+          350,
+          80,
+          {
+            align: "right",
+          }
+        );
+
+      /*
+       * JOB INFORMATION
+       */
+
+      doc.moveDown(4);
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(11)
+        .text("Job Details");
+
+      doc.moveDown(0.5);
+
+      doc
+        .font("Helvetica")
+        .fontSize(10)
+        .text(`Reference: ${data.reference}`);
+
+      doc.text(`Job: ${data.jobName}`);
+
+      if (data.customerPO) {
+        doc.text(`Customer PO: ${data.customerPO}`);
+      }
+
+      doc.moveDown(1.5);
+
+      /*
+       * TABLE HEADER
+       */
+
+      const xRate = 45;
+      const xDescription = 170;
+      const xQty = 385;
+      const xPrice = 430;
+      const xTotal = 500;
+
+      let y = doc.y;
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9);
+
+      doc.text("Item", xRate, y, {
+        width: 115,
+      });
+
+      doc.text("Description", xDescription, y, {
+        width: 200,
+      });
+
+      doc.text("Qty", xQty, y, {
+        width: 35,
+        align: "right",
+      });
+
+      doc.text("Price", xPrice, y, {
+        width: 60,
+        align: "right",
+      });
+
+      doc.text("Total", xTotal, y, {
+        width: 60,
+        align: "right",
+      });
+
+      y += 18;
+
+      doc
+        .moveTo(45, y)
+        .lineTo(560, y)
+        .stroke();
+
+      y += 10;
+
+      /*
+       * LINE ITEMS
+       */
+
+      doc.font("Helvetica").fontSize(8);
+
+      for (const line of data.lines) {
+        const rowHeight = 55;
+
+        if (y + rowHeight > 730) {
+          doc.addPage();
+          y = 50;
+        }
+
+        doc.text(
+          line.rate,
+          xRate,
+          y,
+          {
+            width: 115,
+          }
+        );
+
+        doc.text(
+          line.description,
+          xDescription,
+          y,
+          {
+            width: 200,
+          }
+        );
+
+        doc.text(
+          String(line.quantity),
+          xQty,
+          y,
+          {
+            width: 35,
+            align: "right",
+          }
+        );
+
+        doc.text(
+          money(line.price),
+          xPrice,
+          y,
+          {
+            width: 60,
+            align: "right",
+          }
+        );
+
+        doc.text(
+          money(line.total),
+          xTotal,
+          y,
+          {
+            width: 60,
+            align: "right",
+          }
+        );
+
+        y += rowHeight;
+      }
+
+      /*
+       * TOTAL
+       */
+
+      y += 10;
+
+      doc
+        .moveTo(350, y)
+        .lineTo(560, y)
+        .stroke();
+
+      y += 12;
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(12)
+        .text(
+          "TOTAL",
+          390,
+          y
+        );
+
+      doc.text(
+        money(data.total),
+        470,
+        y,
+        {
+          width: 90,
+          align: "right",
+        }
+      );
+
+      /*
+       * FOOTER
+       */
+
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .text(
+          documentType === "invoice"
+            ? `Payment terms: ${PAYMENT_TERMS}`
+            : "Quotation subject to Vanguard Traffic Services terms and conditions.",
+          45,
+          760,
+          {
+            align: "center",
+            width: 515,
+          }
+        );
+
+      doc.end();
+    } catch (error) {
+      reject(error);
     }
-    y += 20;
-    const totalsX = 365;
-    doc.font('Helvetica').fontSize(10).text('Subtotal', totalsX, y, { width: 125 }).text(money(subtotal), 495, y, { width: 58, align: 'right' });
-    doc.text('Total Domestic Reverse\nCharge @ 20% (VAT on\nIncome)', totalsX, y + 20, { width: 125 }).text('£0.00', 495, y + 40, { width: 58, align: 'right' });
-    doc.moveTo(totalsX, y + 69).lineTo(pageRight, y + 69).strokeColor(dark).stroke();
-    doc.font('Helvetica-Bold').fontSize(11).text('Total', totalsX, y + 82).text(money(subtotal), 495, y + 82, { width: 58, align: 'right' });
-    doc.moveTo(totalsX, y + 104).lineTo(pageRight, y + 104).strokeColor(dark).stroke();
-    doc.rect(totalsX, y + 118, 190, 26).fill(accent);
-    doc.fillColor(dark).font('Helvetica-Bold').fontSize(12).text('Invoice Total', totalsX + 3, y + 125).text(money(subtotal), 495, y + 125, { width: 58, align: 'right' });
-    doc.fillColor('#555').font('Helvetica-Oblique').fontSize(8.5)
-      .text('* Domestic reverse charge (DRC) applies to items marked.\nCustomers need to account for VAT on these items to HMRC, at\n20% of the rates shown.', 40, y + 30, { width: 270 });
-    doc.fillColor(dark).font('Helvetica').fontSize(8.5)
-      .text(process.env.BANK_DETAILS || 'Bank: Tide Business Banking\nAccount Number: 33763868\nSort Code: 04-06-05\nAccount Name: Vanguard Traffic Services LTD', 40, y + 112, { width: 270 });
-    doc.end();
   });
 }
 
-async function uploadPdf(itemId, filename, buffer) {
+/*
+|--------------------------------------------------------------------------
+| UPLOAD PDF TO MONDAY
+|--------------------------------------------------------------------------
+*/
+
+async function uploadFileToMonday(
+  itemId,
+  columnId,
+  filename,
+  pdfBuffer
+) {
+  requireEnv();
+
   const form = new FormData();
-  form.append('query', `mutation ($file: File!) { add_file_to_column(item_id: ${itemId}, column_id: "${process.env.MONDAY_FILES_COLUMN_ID}", file: $file) { id } }`);
-  form.append('map', JSON.stringify({ file: 'variables.file' }));
-  form.append('variables', JSON.stringify({ file: null }));
-  form.append('file', Readable.from(buffer), { filename, contentType: 'application/pdf' });
-  const { data } = await axios.post('https://api.monday.com/v2/file', form, { headers: { Authorization: process.env.MONDAY_API_TOKEN, ...form.getHeaders() }, timeout: 60000 });
-  if (data.errors?.length) throw new Error(data.errors.map(e => e.message).join('; '));
-}
 
-function authorised(req) {
-  const actual = String(req.query.secret || req.get('x-webhook-secret') || '');
-  const expected = String(process.env.WEBHOOK_SECRET || '');
-  return actual.length === expected.length && crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
-}
+  const query = `
+    mutation ($file: File!) {
+      add_file_to_column(
+        item_id: ${Number(itemId)},
+        column_id: "${columnId}",
+        file: $file
+      ) {
+        id
+      }
+    }
+  `;
 
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'vanguard-monday-invoice-api' }));
-app.post('/monday/invoice', async (req, res) => {
-  if (req.body?.challenge) return res.json({ challenge: req.body.challenge });
-  if (!authorised(req)) return res.status(401).json({ error: 'Unauthorised webhook.' });
-  const itemId = req.body?.itemId || req.body?.pulseId || req.body?.event?.pulseId || req.body?.event?.itemId;
-  if (!itemId) return res.status(400).json({ error: 'Missing Monday item ID.' });
-  try {
-    const missing = required.filter(key => !process.env[key]);
-    if (missing.length) throw new Error(`Missing configuration: ${missing.join(', ')}`);
-    const job = await getJob(itemId);
-    const pdf = await renderInvoice(job);
-    const filename = `${job.reference} Invoice.pdf`;
-    await uploadPdf(job.itemId, filename, pdf);
-    res.json({ ok: true, filename, total: job.lines.reduce((sum, line) => sum + line.total, 0) });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message || 'Invoice generation failed.' });
+  form.append(
+    "query",
+    query
+  );
+
+  form.append(
+    "variables[file]",
+    pdfBuffer,
+    {
+      filename,
+      contentType: "application/pdf",
+    }
+  );
+
+  const response = await axios.post(
+    "https://api.monday.com/v2/file",
+    form,
+    {
+      headers: {
+        Authorization: MONDAY_API_TOKEN,
+        ...form.getHeaders(),
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    }
+  );
+
+  if (response.data.errors) {
+    throw new Error(
+      JSON.stringify(response.data.errors)
+    );
   }
+
+  return response.data;
+}
+
+/*
+|--------------------------------------------------------------------------
+| UPDATE JOB MASTER
+|--------------------------------------------------------------------------
+*/
+
+async function updateJobAfterGeneration(
+  itemId,
+  documentType,
+  total
+) {
+  const columnValues =
+    documentType === "quote"
+      ? {
+          [QUOTE_VALUE_COLUMN_ID]: total,
+          [QUOTE_SENT_COLUMN_ID]: {
+            date: today(),
+          },
+          [BILLING_COLUMN_ID]: {
+            label: "Done",
+          },
+        }
+      : {
+          [INVOICE_VALUE_COLUMN_ID]: total,
+          [INVOICE_SENT_COLUMN_ID]: {
+            date: today(),
+          },
+          [BILLING_COLUMN_ID]: {
+            label: "Done",
+          },
+        };
+
+  const mutation = `
+    mutation (
+      $boardId: ID!,
+      $itemId: ID!,
+      $columnValues: JSON!
+    ) {
+      change_multiple_column_values(
+        board_id: $boardId,
+        item_id: $itemId,
+        column_values: $columnValues
+      ) {
+        id
+      }
+    }
+  `;
+
+  /*
+   * We don't need to hard-code the board ID because
+   * Monday allows us to retrieve it from the item.
+   */
+
+  const boardQuery = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        board {
+          id
+        }
+      }
+    }
+  `;
+
+  const boardData = await mondayGraphQL(
+    boardQuery,
+    {
+      itemIds: [String(itemId)],
+    }
+  );
+
+  const boardId =
+    boardData.items[0].board.id;
+
+  await mondayGraphQL(
+    mutation,
+    {
+      boardId: String(boardId),
+      itemId: String(itemId),
+      columnValues:
+        JSON.stringify(columnValues),
+    }
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| GENERATE QUOTE / INVOICE
+|--------------------------------------------------------------------------
+*/
+
+async function generateDocument(
+  itemId,
+  documentType
+) {
+  if (
+    documentType !== "quote" &&
+    documentType !== "invoice"
+  ) {
+    throw new Error(
+      "documentType must be quote or invoice"
+    );
+  }
+
+  const item = await getJob(itemId);
+
+  const data = buildDocumentData(item);
+
+  if (!data.lines.length) {
+    throw new Error(
+      "No rate subitems were found for this job."
+    );
+  }
+
+  const pdfBuffer =
+    await renderDocument(
+      data,
+      documentType
+    );
+
+  const columnId =
+    documentType === "quote"
+      ? QUOTE_FILES_COLUMN_ID
+      : INVOICE_FILES_COLUMN_ID;
+
+  const documentLabel =
+    documentType === "quote"
+      ? "Quote"
+      : "Invoice";
+
+  const safeReference =
+    String(data.reference)
+      .replace(/[^\w\-]+/g, "_");
+
+  const filename =
+    `${safeReference} ${documentLabel}.pdf`;
+
+  await uploadFileToMonday(
+    itemId,
+    columnId,
+    filename,
+    pdfBuffer
+  );
+
+  await updateJobAfterGeneration(
+    itemId,
+    documentType,
+    data.total
+  );
+
+  return {
+    ok: true,
+    itemId,
+    documentType,
+    filename,
+    total: data.total,
+    lines: data.lines.length,
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| HEALTH CHECK
+|--------------------------------------------------------------------------
+*/
+
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service:
+      "vanguard-monday-document-api",
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service:
+      "vanguard-monday-document-api",
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| MANUAL TEST ENDPOINT
+|--------------------------------------------------------------------------
+|
+| POST:
+|
+| /generate
+|
+| {
+|   "itemId": "123456789",
+|   "documentType": "quote"
+| }
+|
+*/
+
+app.post("/generate", async (req, res) => {
+  try {
+    requireEnv();
+
+    const {
+      itemId,
+      documentType,
+    } = req.body || {};
+
+    if (!itemId) {
+      return res.status(400).json({
+        ok: false,
+        error: "itemId is required",
+      });
+    }
+
+    if (
+      documentType !== "quote" &&
+      documentType !== "invoice"
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "documentType must be quote or invoice",
+      });
+    }
+
+    const result =
+      await generateDocument(
+        itemId,
+        documentType
+      );
+
+    res.json(result);
+  } catch (error) {
+    console.error(
+      "Generate error:",
+      error.message
+    );
+
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| MONDAY WEBHOOK
+|--------------------------------------------------------------------------
+*/
+
+app.post(
+  "/monday/document",
+  async (req, res) => {
+    try {
+      /*
+       * Monday webhook verification
+       */
+
+      if (req.body?.challenge) {
+        return res.json({
+          challenge:
+            req.body.challenge,
+        });
+      }
+
+      /*
+       * Optional webhook secret
+       */
+
+      const suppliedSecret =
+        req.query.secret ||
+        req.headers[
+          "x-webhook-secret"
+        ];
+
+      if (
+        WEBHOOK_SECRET &&
+        suppliedSecret !==
+          WEBHOOK_SECRET
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Invalid webhook secret",
+          });
+      }
+
+      const event =
+        req.body?.event || {};
+
+      const itemId =
+        event.pulseId ||
+        event.itemId ||
+        req.body?.itemId;
+
+      if (!itemId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "No Monday item ID received.",
+          });
+      }
+
+      /*
+       * Read the current Billing status
+       * directly from Monday.
+       */
+
+      const item =
+        await getJob(itemId);
+
+      const billing =
+        getColumnText(
+          item,
+          BILLING_COLUMN_ID
+        );
+
+      let documentType;
+
+      if (billing === "Create Quote") {
+        documentType = "quote";
+      } else if (
+        billing === "Create Invoice"
+      ) {
+        documentType = "invoice";
+      } else {
+        return res.json({
+          ok: true,
+          ignored: true,
+          billing,
+        });
+      }
+
+      /*
+       * Respond to Monday immediately.
+       * Generation continues after response.
+       */
+
+      res.json({
+        ok: true,
+        accepted: true,
+        itemId,
+        documentType,
+      });
+
+      generateDocument(
+        itemId,
+        documentType
+      ).catch((error) => {
+        console.error(
+          "Webhook generation failed:",
+          error.message
+        );
+      });
+    } catch (error) {
+      console.error(
+        "Webhook error:",
+        error.message
+      );
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          ok: false,
+          error: error.message,
+        });
+      }
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| LEGACY INVOICE ENDPOINT
+|--------------------------------------------------------------------------
+|
+| Keep yesterday's endpoint alive while
+| we transition the Monday automation.
+|
+*/
+
+app.post(
+  "/monday/invoice",
+  async (req, res) => {
+    try {
+      const suppliedSecret =
+        req.query.secret ||
+        req.headers[
+          "x-webhook-secret"
+        ];
+
+      if (
+        WEBHOOK_SECRET &&
+        suppliedSecret !==
+          WEBHOOK_SECRET
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Invalid webhook secret",
+          });
+      }
+
+      if (req.body?.challenge) {
+        return res.json({
+          challenge:
+            req.body.challenge,
+        });
+      }
+
+      const itemId =
+        req.body?.event?.pulseId ||
+        req.body?.event?.itemId ||
+        req.body?.itemId;
+
+      if (!itemId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "No Monday item ID received.",
+          });
+      }
+
+      res.json({
+        ok: true,
+        accepted: true,
+        itemId,
+        documentType:
+          "invoice",
+      });
+
+      generateDocument(
+        itemId,
+        "invoice"
+      ).catch((error) => {
+        console.error(
+          "Legacy invoice generation failed:",
+          error.message
+        );
+      });
+    } catch (error) {
+      console.error(
+        "Invoice webhook error:",
+        error.message
+      );
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          ok: false,
+          error: error.message,
+        });
+      }
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| START SERVER
+|--------------------------------------------------------------------------
+*/
+
+app.listen(PORT, () => {
+  console.log(
+    `Vanguard document API running on port ${PORT}`
+  );
 });
 
 app.listen(process.env.PORT || 10000, () => console.log('Invoice API running'));
