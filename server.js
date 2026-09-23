@@ -18,13 +18,14 @@ const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 const COMPANY_NAME =
-  process.env.COMPANY_NAME || "Vanguard Traffic Services";
+  process.env.COMPANY_NAME || "Vanguard Traffic Services LTD";
 
 const COMPANY_ADDRESS =
-  process.env.COMPANY_ADDRESS || "";
+  process.env.COMPANY_ADDRESS ||
+  "66 Paul Street, London, England, United Kingdom, EC2A 4NA";
 
 const COMPANY_NUMBER =
-  process.env.COMPANY_NUMBER || "";
+  process.env.COMPANY_NUMBER || "17462744";
 
 const PAYMENT_TERMS =
   process.env.PAYMENT_TERMS || "30 days";
@@ -50,26 +51,59 @@ const OUR_REFERENCE_COLUMN_ID = "formula_mm763fdy";
 
 /*
 |--------------------------------------------------------------------------
+| ADDITIONAL JOB COLUMN IDS
+|--------------------------------------------------------------------------
+*/
+
+const CUSTOMER_COLUMN_ID = "board_relation_mm76d0ay";
+
+const CUSTOMER_EMAIL_COLUMN_ID = "lookup_mm77b8ak";
+
+const LOCATION_COLUMN_ID = "location_mm76dnbp";
+
+const W3W_COLUMN_ID = "text_mm76hwm2";
+
+const TM_SPECIFICS_COLUMN_ID = "dropdown_mm76ekzy";
+
+const OPERATIVES_COLUMN_ID = "numeric_mm764crt";
+
+const VEHICLES_COLUMN_ID = "numeric_mm761q8k";
+
+const WORK_PERIOD_COLUMN_ID = "timerange_mm76qd9t";
+
+const WORKING_TIMES_COLUMN_ID = "dropdown_mm76ghan";
+
+const NOTES_COLUMN_ID = "long_textrg15o4gb";
+
+const SURVEY_COLUMN_ID = "boolean_mm76tj7k";
+
+const CAD_COLUMN_ID = "boolean_mm76z0t3";
+
+const PERMIT_COLUMN_ID = "boolean_mm76jrnc";
+
+const DELIVERY_COLUMN_ID = "boolean_mm763j1w";
+
+/*
+|--------------------------------------------------------------------------
 | SUBITEM COLUMN IDS
 |--------------------------------------------------------------------------
 */
 
 const RATE_COLUMN_ID = "board_relation_mm76nrce";
+
 const DESCRIPTION_COLUMN_ID = "lookup_mm768ay6";
+
 const QUANTITY_COLUMN_ID = "numeric_mm76kqt5";
 
-// Original mirror price column.
 const PRICE_MIRROR_COLUMN_ID = "lookup_mm76v66j";
 
-// Formula on the subitem board which resolves the mirrored price.
-// Live Monday data confirmed this returns 425 / 50 / 0 / 800.
 const PRICE_FORMULA_COLUMN_ID = "formula_mm7eqee4";
 
 const TOTAL_COLUMN_ID = "formula_mm76er3t";
 
 /*
 |--------------------------------------------------------------------------
-| HELPERS
+| ENVIRONMENT CHECK
 |--------------------------------------------------------------------------
 */
 
@@ -80,12 +114,18 @@ function requireEnv() {
     missing.push("MONDAY_API_TOKEN");
   }
 
-  if (missing.length) {
+  if (missing.length > 0) {
     throw new Error(
       `Missing environment variables: ${missing.join(", ")}`
     );
   }
 }
+
+/*
+|--------------------------------------------------------------------------
+| MONDAY GRAPHQL
+|--------------------------------------------------------------------------
+*/
 
 async function mondayGraphQL(query, variables = {}) {
   requireEnv();
@@ -247,18 +287,6 @@ function getLinkedItemName(item, columnId) {
   }
 
   if (
-    Array.isArray(column.linked_item_ids) &&
-    column.linked_item_ids.length &&
-    Array.isArray(column.linked_items) &&
-    column.linked_items.length
-  ) {
-    return column.linked_items
-      .map((linkedItem) => linkedItem.name || "")
-      .filter(Boolean)
-      .join(", ");
-  }
-
-  if (
     Array.isArray(column.linked_items) &&
     column.linked_items.length
   ) {
@@ -276,7 +304,11 @@ function getLinkedItemName(item, columnId) {
       return column.display_value
         .map((value) => {
           if (typeof value === "object") {
-            return value.name || value.display_value || "";
+            return (
+              value.name ||
+              value.display_value ||
+              ""
+            );
           }
 
           return String(value || "");
@@ -294,6 +326,50 @@ function getLinkedItemName(item, columnId) {
   }
 
   return getBasicText(item, columnId);
+}
+
+function getBooleanValue(item, columnId) {
+  const column = getColumn(item, columnId);
+
+  if (!column) {
+    return false;
+  }
+
+  const text = String(
+    column.text || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (
+    text === "v" ||
+    text === "yes" ||
+    text === "true" ||
+    text === "1" ||
+    text === "checked"
+  ) {
+    return true;
+  }
+
+  try {
+    if (column.value) {
+      const parsed =
+        typeof column.value === "string"
+          ? JSON.parse(column.value)
+          : column.value;
+
+      if (
+        parsed === true ||
+        parsed?.checked === true
+      ) {
+        return true;
+      }
+    }
+  } catch (error) {
+    // Ignore malformed boolean values.
+  }
+
+  return false;
 }
 
 function parseNumber(value) {
@@ -348,17 +424,18 @@ function today() {
     .slice(0, 10);
 }
 
+function formattedToday() {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date());
+}
+
 /*
 |--------------------------------------------------------------------------
 | READ MONDAY JOB
 |--------------------------------------------------------------------------
-|
-| Important:
-|
-| FormulaValue, MirrorValue and BoardRelationValue are queried using
-| inline fragments so we can access their typed fields rather than
-| relying only on generic "text".
-|
 */
 
 async function getJob(itemId) {
@@ -387,7 +464,6 @@ async function getJob(itemId) {
 
           ... on BoardRelationValue {
             display_value
-
             linked_item_ids
 
             linked_items {
@@ -416,7 +492,6 @@ async function getJob(itemId) {
 
             ... on BoardRelationValue {
               display_value
-
               linked_item_ids
 
               linked_items {
@@ -478,16 +553,6 @@ function buildDocumentData(item) {
   const lines =
     (item.subitems || []).map(
       (subitem) => {
-        /*
-        |--------------------------------------------------------------------------
-        | RATE
-        |--------------------------------------------------------------------------
-        |
-        | This is a Connect Boards column.
-        | We want the NAME of the linked Rates-board item.
-        |
-        */
-
         const rate =
           getLinkedItemName(
             subitem,
@@ -496,26 +561,11 @@ function buildDocumentData(item) {
           subitem.name ||
           "";
 
-        /*
-        |--------------------------------------------------------------------------
-        | DESCRIPTION
-        |--------------------------------------------------------------------------
-        |
-        | Mirror from the Rates board.
-        |
-        */
-
         const description =
           getMirrorValue(
             subitem,
             DESCRIPTION_COLUMN_ID
           ) || "";
-
-        /*
-        |--------------------------------------------------------------------------
-        | QUANTITY
-        |--------------------------------------------------------------------------
-        */
 
         const quantity =
           parseNumber(
@@ -524,24 +574,6 @@ function buildDocumentData(item) {
               QUANTITY_COLUMN_ID
             )
           );
-
-        /*
-        |--------------------------------------------------------------------------
-        | PRICE
-        |--------------------------------------------------------------------------
-        |
-        | First use formula_mm7eqee4.
-        |
-        | Live Monday inspection confirmed this currently resolves:
-        |
-        | 2 Way Signals       -> 425
-        | TM Plan Same Day    -> 50
-        | TTRO                -> 0
-        | Large Road Closure  -> 800
-        |
-        | If the formula ever fails, fall back to the mirrored Price.
-        |
-        */
 
         let price =
           parseNumber(
@@ -560,17 +592,6 @@ function buildDocumentData(item) {
               )
             );
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | TOTAL
-        |--------------------------------------------------------------------------
-        |
-        | Use Monday's Total formula first.
-        |
-        | If it isn't available through the API, calculate Qty x Price.
-        |
-        */
 
         let total =
           parseNumber(
@@ -610,11 +631,103 @@ function buildDocumentData(item) {
 
   return {
     itemId: item.id,
-    boardId: item.board?.id,
-    jobName: item.name,
+
+    boardId:
+      item.board?.id,
+
+    jobName:
+      item.name,
+
     reference,
+
     customerPO,
+
+    customerName:
+      getLinkedItemName(
+        item,
+        CUSTOMER_COLUMN_ID
+      ),
+
+    customerEmail:
+      getMirrorValue(
+        item,
+        CUSTOMER_EMAIL_COLUMN_ID
+      ),
+
+    location:
+      getBasicText(
+        item,
+        LOCATION_COLUMN_ID
+      ),
+
+    what3words:
+      getBasicText(
+        item,
+        W3W_COLUMN_ID
+      ),
+
+    trafficSpecifics:
+      getBasicText(
+        item,
+        TM_SPECIFICS_COLUMN_ID
+      ),
+
+    operatives:
+      getBasicText(
+        item,
+        OPERATIVES_COLUMN_ID
+      ),
+
+    vehicles:
+      getBasicText(
+        item,
+        VEHICLES_COLUMN_ID
+      ),
+
+    workPeriod:
+      getBasicText(
+        item,
+        WORK_PERIOD_COLUMN_ID
+      ),
+
+    workingTimes:
+      getBasicText(
+        item,
+        WORKING_TIMES_COLUMN_ID
+      ),
+
+    notes:
+      getBasicText(
+        item,
+        NOTES_COLUMN_ID
+      ),
+
+    survey:
+      getBooleanValue(
+        item,
+        SURVEY_COLUMN_ID
+      ),
+
+    cad:
+      getBooleanValue(
+        item,
+        CAD_COLUMN_ID
+      ),
+
+    permitSupport:
+      getBooleanValue(
+        item,
+        PERMIT_COLUMN_ID
+      ),
+
+    delivery:
+      getBooleanValue(
+        item,
+        DELIVERY_COLUMN_ID
+      ),
+
     lines,
+
     total,
   };
 }
@@ -625,353 +738,1233 @@ function buildDocumentData(item) {
 |--------------------------------------------------------------------------
 */
 
-function renderDocument(
-  data,
-  documentType
-) {
-  return new Promise(
-    (resolve, reject) => {
-      try {
-        const doc =
-          new PDFDocument({
-            size: "A4",
-            margin: 45,
-          });
+function renderDocument(data, documentType) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc =
+        new PDFDocument({
+          size: "A4",
+          margin: 0,
+          bufferPages: true,
+          info: {
+            Title:
+              documentType === "quote"
+                ? `Quote ${data.reference}`
+                : `Invoice ${data.reference}`,
 
-        const chunks = [];
+            Author:
+              "Vanguard Traffic Services LTD",
+          },
+        });
 
-        doc.on(
-          "data",
-          (chunk) =>
-            chunks.push(chunk)
+      const chunks = [];
+
+      doc.on(
+        "data",
+        (chunk) =>
+          chunks.push(chunk)
+      );
+
+      doc.on(
+        "end",
+        () =>
+          resolve(
+            Buffer.concat(chunks)
+          )
+      );
+
+      doc.on(
+        "error",
+        reject
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | BRAND
+      |--------------------------------------------------------------------------
+      */
+
+      const BLACK = "#080808";
+      const DARK_GREY = "#777777";
+      const MID_GREY = "#D9D9D9";
+      const LIGHT_GREY = "#F2F2F2";
+      const WHITE = "#FFFFFF";
+      const LIME = "#DFFF00";
+
+      const LEFT = 15;
+      const RIGHT = 580;
+      const CONTENT_W =
+        RIGHT - LEFT;
+
+      const documentTitle =
+        documentType === "quote"
+          ? "Quote"
+          : "Invoice";
+
+      const numberPrefix =
+        documentType === "quote"
+          ? "Q"
+          : "INV";
+
+      const documentNumber =
+        `${numberPrefix}-${data.reference}`;
+
+      function safe(
+        value,
+        fallback = ""
+      ) {
+        if (
+          value === null ||
+          value === undefined ||
+          String(value).trim() === ""
+        ) {
+          return fallback;
+        }
+
+        return String(value).trim();
+      }
+
+      function fillBox(
+        x,
+        y,
+        width,
+        height,
+        colour
+      ) {
+        doc
+          .save()
+          .fillColor(colour)
+          .rect(
+            x,
+            y,
+            width,
+            height
+          )
+          .fill()
+          .restore();
+      }
+
+      function drawLine(
+        x1,
+        y1,
+        x2,
+        y2,
+        colour = MID_GREY
+      ) {
+        doc
+          .strokeColor(colour)
+          .lineWidth(0.5)
+          .moveTo(x1, y1)
+          .lineTo(x2, y2)
+          .stroke();
+      }
+
+      function serviceMark(
+        value
+      ) {
+        return value
+          ? "YES"
+          : "NO";
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | HEADER
+      |--------------------------------------------------------------------------
+      */
+
+      doc
+        .fillColor(BLACK)
+        .font("Helvetica-Bold")
+        .fontSize(20)
+        .text(
+          documentTitle,
+          LEFT,
+          20
         );
 
-        doc.on(
-          "end",
-          () =>
-            resolve(
-              Buffer.concat(chunks)
+      /*
+       * Temporary text-based Vanguard logo.
+       * No external file dependency is required.
+       */
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(19)
+        .text(
+          "VANGUARD",
+          410,
+          20,
+          {
+            width: 165,
+            align: "center",
+          }
+        );
+
+      doc
+        .fontSize(6.5)
+        .characterSpacing(2.2)
+        .text(
+          "TRAFFIC SERVICES",
+          410,
+          43,
+          {
+            width: 165,
+            align: "center",
+          }
+        );
+
+      doc.characterSpacing(0);
+
+      /*
+      |--------------------------------------------------------------------------
+      | CUSTOMER / SUPPLIER DETAILS
+      |--------------------------------------------------------------------------
+      */
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .fillColor(BLACK)
+        .text(
+          safe(
+            data.customerName,
+            "Customer"
+          ),
+          LEFT,
+          79
+        );
+
+      if (data.customerEmail) {
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .text(
+            data.customerEmail,
+            LEFT,
+            94,
+            {
+              width: 320,
+            }
+          );
+      }
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text(
+          COMPANY_NAME,
+          375,
+          79,
+          {
+            width: 200,
+            align: "right",
+          }
+        );
+
+      doc
+        .font("Helvetica")
+        .fontSize(7.5)
+        .text(
+          COMPANY_ADDRESS,
+          375,
+          94,
+          {
+            width: 200,
+            align: "right",
+          }
+        );
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(7.5)
+        .text(
+          `Company number ${COMPANY_NUMBER}`,
+          375,
+          126,
+          {
+            width: 200,
+            align: "right",
+          }
+        );
+
+      /*
+      |--------------------------------------------------------------------------
+      | SUMMARY STRIP
+      |--------------------------------------------------------------------------
+      */
+
+      const summaryY = 160;
+
+      fillBox(
+        LEFT,
+        summaryY,
+        CONTENT_W,
+        17,
+        LIGHT_GREY
+      );
+
+      const summary =
+        [
+          {
+            label:
+              documentType === "quote"
+                ? "Quote Total"
+                : "Invoice Total",
+
+            value:
+              money(data.total),
+
+            x: LEFT,
+            width: 150,
+          },
+
+          {
+            label:
+              "Issue date",
+
+            value:
+              formattedToday(),
+
+            x: 165,
+            width: 105,
+          },
+
+          {
+            label:
+              "Works Reference",
+
+            value:
+              data.reference,
+
+            x: 270,
+            width: 100,
+          },
+
+          {
+            label:
+              "PO Number",
+
+            value:
+              data.customerPO ||
+              "-",
+
+            x: 370,
+            width: 90,
+          },
+
+          {
+            label:
+              documentType === "quote"
+                ? "Quote No."
+                : "Invoice No.",
+
+            value:
+              documentNumber,
+
+            x: 460,
+            width: 115,
+          },
+        ];
+
+      summary.forEach(
+        (field) => {
+          doc
+            .font(
+              "Helvetica-Bold"
             )
+            .fontSize(6.5)
+            .fillColor(BLACK)
+            .text(
+              field.label,
+              field.x + 2,
+              summaryY + 4,
+              {
+                width:
+                  field.width - 4,
+              }
+            );
+
+          doc
+            .fontSize(8.5)
+            .text(
+              safe(
+                field.value,
+                "-"
+              ),
+              field.x + 2,
+              summaryY + 21,
+              {
+                width:
+                  field.width - 4,
+              }
+            );
+        }
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | REFERENCE / SITE
+      |--------------------------------------------------------------------------
+      */
+
+      let y = 211;
+
+      fillBox(
+        LEFT,
+        y,
+        CONTENT_W,
+        17,
+        LIGHT_GREY
+      );
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(7)
+        .fillColor(BLACK)
+        .text(
+          "Reference",
+          LEFT + 3,
+          y + 5
         );
 
-        doc.on(
-          "error",
-          reject
-        );
+      y += 24;
 
-        const title =
-          documentType === "quote"
-            ? "QUOTATION"
-            : "INVOICE";
-
-        /*
-        |--------------------------------------------------------------------------
-        | HEADER
-        |--------------------------------------------------------------------------
-        */
-
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(22)
-          .text(
-            "VANGUARD",
-            45,
-            45
-          );
-
-        doc
-          .font("Helvetica")
-          .fontSize(9)
-          .text(
-            COMPANY_NAME,
-            45,
-            75
-          );
-
-        if (COMPANY_ADDRESS) {
-          doc.text(
-            COMPANY_ADDRESS
-          );
-        }
-
-        if (COMPANY_NUMBER) {
-          doc.text(
-            `Company No: ${COMPANY_NUMBER}`
-          );
-        }
-
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(24)
-          .text(
-            title,
-            350,
-            45,
-            {
-              width: 210,
-              align: "right",
-            }
-          );
-
-        doc
-          .font("Helvetica")
-          .fontSize(10)
-          .text(
-            `Date: ${today()}`,
-            350,
-            80,
-            {
-              width: 210,
-              align: "right",
-            }
-          );
-
-        /*
-        |--------------------------------------------------------------------------
-        | JOB DETAILS
-        |--------------------------------------------------------------------------
-        */
-
-        doc.moveDown(4);
-
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(11)
-          .text("Job Details");
-
-        doc.moveDown(0.5);
-
-        doc
-          .font("Helvetica")
-          .fontSize(10)
-          .text(
-            `Reference: ${data.reference}`
-          );
-
-        doc.text(
-          `Job: ${data.jobName}`
-        );
-
-        if (data.customerPO) {
-          doc.text(
-            `Customer PO: ${data.customerPO}`
-          );
-        }
-
-        doc.moveDown(1.5);
-
-        /*
-        |--------------------------------------------------------------------------
-        | TABLE
-        |--------------------------------------------------------------------------
-        */
-
-        const xRate = 45;
-        const xDescription = 170;
-        const xQty = 385;
-        const xPrice = 430;
-        const xTotal = 500;
-
-        let y = doc.y;
-
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(9);
-
-        doc.text(
-          "Item",
-          xRate,
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text(
+          safe(
+            data.jobName,
+            data.reference
+          ),
+          LEFT + 3,
           y,
           {
-            width: 115,
+            width:
+              CONTENT_W - 6,
+          }
+        );
+
+      y += 15;
+
+      if (
+        data.trafficSpecifics
+      ) {
+        doc
+          .font("Helvetica")
+          .fontSize(7.5)
+          .text(
+            `Traffic Management: ${data.trafficSpecifics}`,
+            LEFT + 3,
+            y
+          );
+
+        y += 12;
+      }
+
+      if (data.location) {
+        doc
+          .font("Helvetica")
+          .fontSize(7.5)
+          .text(
+            data.location,
+            LEFT + 3,
+            y,
+            {
+              width:
+                CONTENT_W - 6,
+            }
+          );
+
+        y += 12;
+      }
+
+      if (data.what3words) {
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .text(
+            `///${String(
+              data.what3words
+            ).replace(
+              /^\/+/,
+              ""
+            )}`,
+            LEFT + 3,
+            y
+          );
+
+        y += 11;
+      }
+
+      if (data.workPeriod) {
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .text(
+            `Works: ${data.workPeriod}`,
+            LEFT + 3,
+            y
+          );
+
+        y += 11;
+      }
+
+      if (data.workingTimes) {
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .text(
+            `Working Hours: ${data.workingTimes}`,
+            LEFT + 3,
+            y
+          );
+
+        y += 11;
+      }
+
+      if (
+        data.operatives ||
+        data.vehicles
+      ) {
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .text(
+            `${safe(
+              data.operatives,
+              "0"
+            )} Operative(s)  |  ${safe(
+              data.vehicles,
+              "0"
+            )} Vehicle(s)`,
+            LEFT + 3,
+            y
+          );
+
+        y += 11;
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | SERVICE FLAGS
+      |--------------------------------------------------------------------------
+      */
+
+      y += 8;
+
+      const serviceY = y;
+
+      fillBox(
+        LEFT,
+        serviceY,
+        CONTENT_W,
+        17,
+        LIGHT_GREY
+      );
+
+      const services =
+        [
+          {
+            name:
+              "Survey",
+
+            value:
+              data.survey,
+          },
+
+          {
+            name:
+              "CAD",
+
+            value:
+              data.cad,
+          },
+
+          {
+            name:
+              "Permits",
+
+            value:
+              data.permitSupport,
+          },
+
+          {
+            name:
+              "Delivery",
+
+            value:
+              data.delivery,
+          },
+        ];
+
+      const serviceWidth =
+        CONTENT_W /
+        services.length;
+
+      services.forEach(
+        (
+          service,
+          index
+        ) => {
+          const x =
+            LEFT +
+            index *
+              serviceWidth;
+
+          doc
+            .font(
+              "Helvetica-Bold"
+            )
+            .fontSize(8)
+            .fillColor(BLACK)
+            .text(
+              service.name,
+              x,
+              serviceY + 5,
+              {
+                width:
+                  serviceWidth,
+                align:
+                  "center",
+              }
+            );
+
+          doc
+            .font("Helvetica")
+            .fontSize(7)
+            .text(
+              serviceMark(
+                service.value
+              ),
+              x,
+              serviceY + 22,
+              {
+                width:
+                  serviceWidth,
+                align:
+                  "center",
+              }
+            );
+        }
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | RATE TABLE
+      |--------------------------------------------------------------------------
+      */
+
+      y =
+        serviceY + 47;
+
+      const columns = {
+        code: {
+          x: 15,
+          width: 95,
+        },
+
+        description: {
+          x: 110,
+          width: 200,
+        },
+
+        quantity: {
+          x: 310,
+          width: 55,
+        },
+
+        price: {
+          x: 365,
+          width: 75,
+        },
+
+        tax: {
+          x: 440,
+          width: 60,
+        },
+
+        amount: {
+          x: 500,
+          width: 80,
+        },
+      };
+
+      function drawTableHeader(
+        tableY
+      ) {
+        fillBox(
+          LEFT,
+          tableY,
+          CONTENT_W,
+          18,
+          DARK_GREY
+        );
+
+        doc
+          .font(
+            "Helvetica-Bold"
+          )
+          .fontSize(7)
+          .fillColor(WHITE);
+
+        doc.text(
+          "Code",
+          columns.code.x + 3,
+          tableY + 5,
+          {
+            width:
+              columns.code.width -
+              6,
           }
         );
 
         doc.text(
           "Description",
-          xDescription,
-          y,
+          columns.description.x +
+            3,
+          tableY + 5,
           {
-            width: 200,
+            width:
+              columns.description
+                .width - 6,
           }
         );
 
         doc.text(
-          "Qty",
-          xQty,
-          y,
+          "Quantity",
+          columns.quantity.x,
+          tableY + 5,
           {
-            width: 35,
+            width:
+              columns.quantity
+                .width - 5,
             align: "right",
           }
         );
 
         doc.text(
           "Price",
-          xPrice,
-          y,
+          columns.price.x,
+          tableY + 5,
           {
-            width: 60,
+            width:
+              columns.price.width -
+              5,
             align: "right",
           }
         );
 
         doc.text(
-          "Total",
-          xTotal,
-          y,
+          "Tax",
+          columns.tax.x,
+          tableY + 5,
           {
-            width: 60,
+            width:
+              columns.tax.width -
+              5,
             align: "right",
           }
         );
 
-        y += 18;
-
-        doc
-          .moveTo(45, y)
-          .lineTo(560, y)
-          .stroke();
-
-        y += 10;
-
-        doc
-          .font("Helvetica")
-          .fontSize(8);
-
-        for (
-          const line of data.lines
-        ) {
-          const rowHeight = 55;
-
-          if (
-            y + rowHeight >
-            730
-          ) {
-            doc.addPage();
-            y = 50;
+        doc.text(
+          "Amount",
+          columns.amount.x,
+          tableY + 5,
+          {
+            width:
+              columns.amount.width -
+              5,
+            align: "right",
           }
+        );
+      }
 
-          doc.text(
-            line.rate,
-            xRate,
-            y,
+      drawTableHeader(y);
+
+      y += 18;
+
+      doc
+        .font("Helvetica")
+        .fontSize(7)
+        .fillColor(BLACK);
+
+      for (
+        const row of data.lines
+      ) {
+        const code =
+          safe(
+            row.rate,
+            ""
+          );
+
+        const description =
+          safe(
+            row.description,
+            ""
+          );
+
+        const codeHeight =
+          doc.heightOfString(
+            code,
             {
-              width: 115,
+              width:
+                columns.code.width -
+                8,
             }
           );
 
-          doc.text(
-            line.description,
-            xDescription,
-            y,
+        const descriptionHeight =
+          doc.heightOfString(
+            description,
             {
-              width: 200,
+              width:
+                columns.description
+                  .width - 8,
             }
           );
 
-          doc.text(
-            String(
-              line.quantity
-            ),
-            xQty,
-            y,
-            {
-              width: 35,
-              align: "right",
-            }
+        const rowHeight =
+          Math.max(
+            40,
+            codeHeight + 12,
+            descriptionHeight +
+              12
           );
 
-          doc.text(
-            money(line.price),
-            xPrice,
-            y,
-            {
-              width: 60,
-              align: "right",
-            }
-          );
+        if (
+          y + rowHeight >
+          655
+        ) {
+          doc.addPage({
+            size: "A4",
+            margin: 0,
+          });
 
-          doc.text(
-            money(line.total),
-            xTotal,
-            y,
-            {
-              width: 60,
-              align: "right",
-            }
-          );
+          y = 30;
 
-          y += rowHeight;
+          drawTableHeader(y);
+
+          y += 18;
+
+          doc
+            .font("Helvetica")
+            .fontSize(7)
+            .fillColor(BLACK);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | TOTAL
-        |--------------------------------------------------------------------------
-        */
-
-        y += 10;
-
         doc
-          .moveTo(350, y)
-          .lineTo(560, y)
+          .strokeColor(
+            MID_GREY
+          )
+          .lineWidth(0.5)
+          .rect(
+            LEFT,
+            y,
+            CONTENT_W,
+            rowHeight
+          )
           .stroke();
 
-        y += 12;
+        [
+          columns.description.x,
+          columns.quantity.x,
+          columns.price.x,
+          columns.tax.x,
+          columns.amount.x,
+        ].forEach(
+          (x) => {
+            drawLine(
+              x,
+              y,
+              x,
+              y + rowHeight
+            );
+          }
+        );
 
         doc
-          .font("Helvetica-Bold")
-          .fontSize(12)
+          .font(
+            "Helvetica-Bold"
+          )
+          .fontSize(7)
+          .fillColor(BLACK)
           .text(
-            "TOTAL",
-            390,
-            y
+            code,
+            columns.code.x + 3,
+            y + 6,
+            {
+              width:
+                columns.code.width -
+                7,
+            }
+          );
+
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .text(
+            description,
+            columns.description.x +
+              3,
+            y + 6,
+            {
+              width:
+                columns.description
+                  .width - 7,
+            }
           );
 
         doc.text(
-          money(data.total),
-          470,
-          y,
+          String(
+            row.quantity
+          ),
+          columns.quantity.x,
+          y + 6,
           {
-            width: 90,
+            width:
+              columns.quantity
+                .width - 5,
             align: "right",
           }
         );
 
-        /*
-        |--------------------------------------------------------------------------
-        | FOOTER
-        |--------------------------------------------------------------------------
-        */
+        doc.text(
+          money(
+            row.price
+          ),
+          columns.price.x,
+          y + 6,
+          {
+            width:
+              columns.price.width -
+              5,
+            align: "right",
+          }
+        );
+
+        doc.text(
+          "20% *",
+          columns.tax.x,
+          y + 6,
+          {
+            width:
+              columns.tax.width -
+              5,
+            align: "right",
+          }
+        );
 
         doc
-          .font("Helvetica")
-          .fontSize(8)
+          .font(
+            "Helvetica-Bold"
+          )
           .text(
-            documentType ===
-              "invoice"
-              ? `Payment terms: ${PAYMENT_TERMS}`
-              : "Quotation subject to Vanguard Traffic Services terms and conditions.",
-            45,
-            760,
+            money(
+              row.total
+            ),
+            columns.amount.x,
+            y + 6,
             {
-              width: 515,
-              align: "center",
+              width:
+                columns.amount
+                  .width - 5,
+              align: "right",
             }
           );
 
-        doc.end();
-      } catch (error) {
-        reject(error);
+        y += rowHeight;
       }
+
+      /*
+      |--------------------------------------------------------------------------
+      | TOTALS
+      |--------------------------------------------------------------------------
+      */
+
+      y += 22;
+
+      if (y > 680) {
+        doc.addPage({
+          size: "A4",
+          margin: 0,
+        });
+
+        y = 45;
+      }
+
+      const totalsX = 390;
+      const totalsValueX = 500;
+
+      doc
+        .font(
+          "Helvetica-Oblique"
+        )
+        .fontSize(6.5)
+        .fillColor("#555555")
+        .text(
+          "* Domestic reverse charge (DRC) applies to items marked.\n" +
+            "The customer accounts for VAT to HMRC at 20%.",
+          LEFT,
+          y,
+          {
+            width: 320,
+          }
+        );
+
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .fillColor(BLACK)
+        .text(
+          "Subtotal",
+          totalsX,
+          y,
+          {
+            width: 105,
+          }
+        );
+
+      doc.text(
+        money(
+          data.total
+        ),
+        totalsValueX,
+        y,
+        {
+          width: 75,
+          align: "right",
+        }
+      );
+
+      y += 24;
+
+      doc.text(
+        "Domestic Reverse\nCharge @ 20%",
+        totalsX,
+        y,
+        {
+          width: 105,
+        }
+      );
+
+      doc.text(
+        money(0),
+        totalsValueX,
+        y + 5,
+        {
+          width: 75,
+          align: "right",
+        }
+      );
+
+      y += 42;
+
+      drawLine(
+        totalsX,
+        y,
+        575,
+        y,
+        BLACK
+      );
+
+      y += 12;
+
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .text(
+          "Total",
+          totalsX,
+          y
+        );
+
+      doc
+        .font(
+          "Helvetica-Bold"
+        )
+        .text(
+          money(
+            data.total
+          ),
+          totalsValueX,
+          y,
+          {
+            width: 75,
+            align: "right",
+          }
+        );
+
+      y += 27;
+
+      drawLine(
+        totalsX,
+        y,
+        575,
+        y,
+        BLACK
+      );
+
+      y += 16;
+
+      /*
+      |--------------------------------------------------------------------------
+      | BACS DETAILS
+      |--------------------------------------------------------------------------
+      */
+
+      const bacsY = y;
+
+      doc
+        .font("Helvetica")
+        .fontSize(7)
+        .fillColor(BLACK)
+        .text(
+          "Bank: Tide Business Banking\n" +
+            "Account Number: 33763868\n" +
+            "Sort Code: 04-06-05\n" +
+            "Account Name: Vanguard Traffic Services LTD",
+          LEFT,
+          bacsY,
+          {
+            width: 300,
+            lineGap: 2,
+          }
+        );
+
+      /*
+      |--------------------------------------------------------------------------
+      | LIME TOTAL BAR
+      |--------------------------------------------------------------------------
+      */
+
+      fillBox(
+        totalsX,
+        bacsY,
+        185,
+        31,
+        LIME
+      );
+
+      doc
+        .font(
+          "Helvetica-Bold"
+        )
+        .fontSize(8.5)
+        .fillColor(BLACK)
+        .text(
+          documentType === "quote"
+            ? "Quote Total"
+            : "Invoice Total",
+          totalsX + 7,
+          bacsY + 11,
+          {
+            width: 90,
+          }
+        );
+
+      doc.text(
+        money(
+          data.total
+        ),
+        totalsX + 95,
+        bacsY + 11,
+        {
+          width: 83,
+          align: "right",
+        }
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | NOTES
+      |--------------------------------------------------------------------------
+      */
+
+      if (
+        data.notes &&
+        bacsY + 55 < 795
+      ) {
+        doc
+          .font(
+            "Helvetica-Bold"
+          )
+          .fontSize(7)
+          .fillColor(BLACK)
+          .text(
+            "Notes",
+            LEFT,
+            bacsY + 55
+          );
+
+        doc
+          .font("Helvetica")
+          .fontSize(6.5)
+          .text(
+            data.notes,
+            LEFT,
+            bacsY + 66,
+            {
+              width: 560,
+            }
+          );
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | FOOTER ON EVERY PAGE
+      |--------------------------------------------------------------------------
+      */
+
+      const range =
+        doc.bufferedPageRange();
+
+      for (
+        let i = 0;
+        i < range.count;
+        i++
+      ) {
+        doc.switchToPage(
+          range.start + i
+        );
+
+        doc
+          .font("Helvetica")
+          .fontSize(6)
+          .fillColor(
+            "#777777"
+          )
+          .text(
+            `${COMPANY_NAME} • Registered in England & Wales No. ${COMPANY_NUMBER}`,
+            LEFT,
+            815,
+            {
+              width: 400,
+            }
+          );
+
+        doc.text(
+          `Page ${i + 1} of ${range.count}`,
+          470,
+          815,
+          {
+            width: 105,
+            align: "right",
+          }
+        );
+      }
+
+      doc.end();
+    } catch (error) {
+      reject(error);
     }
-  );
+  });
 }
 
 /*
 |--------------------------------------------------------------------------
-| UPLOAD PDF TO MONDAY
+| UPLOAD FILE TO MONDAY
 |--------------------------------------------------------------------------
 */
 
@@ -1023,6 +2016,7 @@ async function uploadFileToMonday(
         headers: {
           Authorization:
             MONDAY_API_TOKEN,
+
           ...form.getHeaders(),
         },
 
@@ -1034,7 +2028,9 @@ async function uploadFileToMonday(
       }
     );
 
-  if (response.data.errors) {
+  if (
+    response.data.errors
+  ) {
     throw new Error(
       JSON.stringify(
         response.data.errors
@@ -1047,7 +2043,7 @@ async function uploadFileToMonday(
 
 /*
 |--------------------------------------------------------------------------
-| UPDATE JOB MASTER
+| UPDATE MONDAY AFTER GENERATION
 |--------------------------------------------------------------------------
 */
 
@@ -1129,7 +2125,7 @@ async function updateJobAfterGeneration(
 
 /*
 |--------------------------------------------------------------------------
-| GENERATE QUOTE / INVOICE
+| GENERATE DOCUMENT
 |--------------------------------------------------------------------------
 */
 
@@ -1152,28 +2148,32 @@ async function generateDocument(
   const data =
     buildDocumentData(item);
 
-  if (!data.lines.length) {
+  if (
+    !data.lines ||
+    !data.lines.length
+  ) {
     throw new Error(
       "No rate subitems were found for this job."
     );
   }
 
   /*
-   * Safety check.
+   * Financial safety check.
    *
-   * Prevent creation of a £0 document if
-   * Monday's rate data fails to resolve.
+   * Never create/upload a £0 document when
+   * chargeable quantities exist.
    */
 
   if (
     data.total === 0 &&
     data.lines.some(
       (line) =>
-        line.quantity > 0
+        line.quantity > 0 &&
+        line.price > 0
     )
   ) {
     throw new Error(
-      "Document total resolved to £0. Generation stopped to prevent an incorrect document."
+      "Document total resolved to £0. Generation stopped."
     );
   }
 
@@ -1183,7 +2183,7 @@ async function generateDocument(
       documentType
     );
 
-  const columnId =
+  const filesColumnId =
     documentType === "quote"
       ? QUOTE_FILES_COLUMN_ID
       : INVOICE_FILES_COLUMN_ID;
@@ -1194,7 +2194,9 @@ async function generateDocument(
       : "Invoice";
 
   const safeReference =
-    String(data.reference)
+    String(
+      data.reference
+    )
       .replace(
         /[^\w\-]+/g,
         "_"
@@ -1209,7 +2211,7 @@ async function generateDocument(
 
   await uploadFileToMonday(
     itemId,
-    columnId,
+    filesColumnId,
     filename,
     pdfBuffer
   );
@@ -1223,12 +2225,20 @@ async function generateDocument(
 
   return {
     ok: true,
+
     itemId:
       String(itemId),
+
     documentType,
+
     filename,
+
+    reference:
+      data.reference,
+
     total:
       data.total,
+
     lineCount:
       data.lines.length,
   };
@@ -1236,7 +2246,7 @@ async function generateDocument(
 
 /*
 |--------------------------------------------------------------------------
-| ROOT / HEALTH
+| ROOT
 |--------------------------------------------------------------------------
 */
 
@@ -1245,17 +2255,28 @@ app.get(
   (req, res) => {
     res.json({
       ok: true,
+
       service:
         "vanguard-monday-document-api",
+
+      status:
+        "Connected to Monday",
     });
   }
 );
+
+/*
+|--------------------------------------------------------------------------
+| HEALTH
+|--------------------------------------------------------------------------
+*/
 
 app.get(
   "/health",
   (req, res) => {
     res.json({
       ok: true,
+
       service:
         "vanguard-monday-document-api",
     });
@@ -1266,13 +2287,6 @@ app.get(
 |--------------------------------------------------------------------------
 | READ-ONLY TEST
 |--------------------------------------------------------------------------
-|
-| This endpoint DOES NOT:
-|
-| - create a PDF
-| - upload a file
-| - modify Monday
-|
 */
 
 app.get(
@@ -1304,6 +2318,39 @@ app.get(
         customerPO:
           data.customerPO,
 
+        customerName:
+          data.customerName,
+
+        location:
+          data.location,
+
+        what3words:
+          data.what3words,
+
+        trafficSpecifics:
+          data.trafficSpecifics,
+
+        operatives:
+          data.operatives,
+
+        vehicles:
+          data.vehicles,
+
+        workPeriod:
+          data.workPeriod,
+
+        survey:
+          data.survey,
+
+        cad:
+          data.cad,
+
+        permitSupport:
+          data.permitSupport,
+
+        delivery:
+          data.delivery,
+
         lines:
           data.lines,
 
@@ -1320,6 +2367,7 @@ app.get(
         .status(500)
         .json({
           ok: false,
+
           error:
             error.message,
         });
@@ -1337,10 +2385,6 @@ app.post(
   "/generate",
   async (req, res) => {
     try {
-      /*
-       * Protect this write endpoint.
-       */
-
       const suppliedSecret =
         req.query.secret ||
         req.headers[
@@ -1356,6 +2400,7 @@ app.post(
           .status(401)
           .json({
             ok: false,
+
             error:
               "Invalid webhook secret",
           });
@@ -1371,6 +2416,7 @@ app.post(
           .status(400)
           .json({
             ok: false,
+
             error:
               "itemId is required",
           });
@@ -1386,6 +2432,7 @@ app.post(
           .status(400)
           .json({
             ok: false,
+
             error:
               "documentType must be quote or invoice",
           });
@@ -1397,17 +2444,20 @@ app.post(
           documentType
         );
 
-      res.json(result);
+      return res.json(
+        result
+      );
     } catch (error) {
       console.error(
-        "Generate error:",
+        "Generate failed:",
         error.message
       );
 
-      res
+      return res
         .status(500)
         .json({
           ok: false,
+
           error:
             error.message,
         });
@@ -1426,12 +2476,12 @@ app.post(
   async (req, res) => {
     try {
       /*
-       * Monday verification challenge must
-       * be handled before secret validation.
+       * Monday verification challenge.
        */
 
       if (
-        req.body?.challenge
+        req.body &&
+        req.body.challenge
       ) {
         return res.json({
           challenge:
@@ -1454,13 +2504,15 @@ app.post(
           .status(401)
           .json({
             ok: false,
+
             error:
               "Invalid webhook secret",
           });
       }
 
       const event =
-        req.body?.event || {};
+        req.body?.event ||
+        {};
 
       const itemId =
         event.pulseId ||
@@ -1472,8 +2524,9 @@ app.post(
           .status(400)
           .json({
             ok: false,
+
             error:
-              "No Monday item ID received.",
+              "No Monday item ID received",
           });
       }
 
@@ -1503,23 +2556,31 @@ app.post(
       } else {
         return res.json({
           ok: true,
+
           ignored: true,
+
           billing,
         });
       }
 
       /*
-       * Respond to Monday before
-       * performing PDF generation.
+       * Acknowledge Monday immediately.
        */
 
       res.json({
         ok: true,
+
         accepted: true,
+
         itemId:
           String(itemId),
+
         documentType,
       });
+
+      /*
+       * Generate after acknowledgement.
+       */
 
       generateDocument(
         itemId,
@@ -1534,7 +2595,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        "Webhook error:",
+        "Webhook failed:",
         error.message
       );
 
@@ -1545,6 +2606,7 @@ app.post(
           .status(500)
           .json({
             ok: false,
+
             error:
               error.message,
           });
@@ -1555,7 +2617,7 @@ app.post(
 
 /*
 |--------------------------------------------------------------------------
-| LEGACY INVOICE ENDPOINT
+| LEGACY MONDAY INVOICE ENDPOINT
 |--------------------------------------------------------------------------
 */
 
@@ -1563,12 +2625,9 @@ app.post(
   "/monday/invoice",
   async (req, res) => {
     try {
-      /*
-       * Monday challenge first.
-       */
-
       if (
-        req.body?.challenge
+        req.body &&
+        req.body.challenge
       ) {
         return res.json({
           challenge:
@@ -1591,6 +2650,7 @@ app.post(
           .status(401)
           .json({
             ok: false,
+
             error:
               "Invalid webhook secret",
           });
@@ -1608,16 +2668,20 @@ app.post(
           .status(400)
           .json({
             ok: false,
+
             error:
-              "No Monday item ID received.",
+              "No Monday item ID received",
           });
       }
 
       res.json({
         ok: true,
+
         accepted: true,
+
         itemId:
           String(itemId),
+
         documentType:
           "invoice",
       });
@@ -1635,7 +2699,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        "Invoice webhook error:",
+        "Legacy invoice webhook failed:",
         error.message
       );
 
@@ -1646,6 +2710,7 @@ app.post(
           .status(500)
           .json({
             ok: false,
+
             error:
               error.message,
           });
@@ -1682,6 +2747,7 @@ app.use(
       .status(500)
       .json({
         ok: false,
+
         error:
           "Internal server error",
       });
@@ -1693,9 +2759,8 @@ app.use(
 | START SERVER
 |--------------------------------------------------------------------------
 |
-| IMPORTANT:
-| There is ONE app.listen() only.
-|
+| ONE app.listen ONLY.
+|--------------------------------------------------------------------------
 */
 
 app.listen(
