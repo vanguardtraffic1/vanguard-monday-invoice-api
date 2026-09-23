@@ -873,15 +873,19 @@ function renderDocument(data, documentType) {
       |--------------------------------------------------------------------------
       */
 
-      doc
-        .fillColor(BLACK)
-        .font("Helvetica-Bold")
-        .fontSize(20)
-        .text(
-          documentTitle,
-          LEFT,
-          20
-        );
+    doc
+  .font("Helvetica-Bold")
+  .fontSize(6.5)
+  .text(
+    "TRAFFIC SERVICES",
+    410,
+    43,
+    {
+      width: 165,
+      align: "center",
+      characterSpacing: 2.2,
+    }
+  );
 
       /*
        * Temporary text-based Vanguard logo.
