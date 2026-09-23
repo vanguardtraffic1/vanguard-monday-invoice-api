@@ -1,4 +1,4 @@
-const express = require("express");
+onst express = require("express");
 const axios = require("axios");
 const PDFDocument = require("pdfkit");
 const FormData = require("form-data");
@@ -905,20 +905,6 @@ function renderDocument(data, documentType) {
           }
         );
 
-      doc
-        .fontSize(6.5)
-        .characterSpacing(2.2)
-        .text(
-          "TRAFFIC SERVICES",
-          410,
-          43,
-          {
-            width: 165,
-            align: "center",
-          }
-        );
-
-      doc.characterSpacing(0);
 
       /*
       |--------------------------------------------------------------------------
