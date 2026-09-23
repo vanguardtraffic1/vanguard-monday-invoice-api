@@ -8,9 +8,11 @@ app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 
-// ============================================================
-// ENVIRONMENT VARIABLES
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| ENVIRONMENT
+|--------------------------------------------------------------------------
+*/
 
 const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
@@ -27,9 +29,11 @@ const COMPANY_NUMBER =
 const PAYMENT_TERMS =
   process.env.PAYMENT_TERMS || "30 days";
 
-// ============================================================
-// JOB MASTER COLUMN IDS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| JOB MASTER COLUMN IDS
+|--------------------------------------------------------------------------
+*/
 
 const BILLING_COLUMN_ID = "color_mm7e6e42";
 
@@ -44,19 +48,30 @@ const INVOICE_SENT_COLUMN_ID = "date_mm766vnc";
 const CUSTOMER_PO_COLUMN_ID = "text_mm77hx84";
 const OUR_REFERENCE_COLUMN_ID = "formula_mm763fdy";
 
-// ============================================================
-// SUBITEM COLUMN IDS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| SUBITEM COLUMN IDS
+|--------------------------------------------------------------------------
+*/
 
 const RATE_COLUMN_ID = "board_relation_mm76nrce";
 const DESCRIPTION_COLUMN_ID = "lookup_mm768ay6";
 const QUANTITY_COLUMN_ID = "numeric_mm76kqt5";
-const PRICE_COLUMN_ID = "lookup_mm76v66j";
+
+// Original mirror price column.
+const PRICE_MIRROR_COLUMN_ID = "lookup_mm76v66j";
+
+// Formula on the subitem board which resolves the mirrored price.
+// Live Monday data confirmed this returns 425 / 50 / 0 / 800.
+const PRICE_FORMULA_COLUMN_ID = "formula_mm7eqee4";
+
 const TOTAL_COLUMN_ID = "formula_mm76er3t";
 
-// ============================================================
-// ENVIRONMENT CHECK
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| HELPERS
+|--------------------------------------------------------------------------
+*/
 
 function requireEnv() {
   const missing = [];
@@ -65,16 +80,12 @@ function requireEnv() {
     missing.push("MONDAY_API_TOKEN");
   }
 
-  if (missing.length > 0) {
+  if (missing.length) {
     throw new Error(
       `Missing environment variables: ${missing.join(", ")}`
     );
   }
 }
-
-// ============================================================
-// MONDAY GRAPHQL
-// ============================================================
 
 async function mondayGraphQL(query, variables = {}) {
   requireEnv();
@@ -102,9 +113,11 @@ async function mondayGraphQL(query, variables = {}) {
   return response.data.data;
 }
 
-// ============================================================
-// COLUMN HELPERS
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| COLUMN HELPERS
+|--------------------------------------------------------------------------
+*/
 
 function getColumn(item, columnId) {
   if (!item || !Array.isArray(item.column_values)) {
@@ -118,24 +131,201 @@ function getColumn(item, columnId) {
   );
 }
 
-function getColumnText(item, columnId) {
+function getBasicText(item, columnId) {
   const column = getColumn(item, columnId);
 
   if (!column) {
     return "";
   }
 
-  return column.text || "";
+  if (
+    column.text !== null &&
+    column.text !== undefined &&
+    String(column.text).trim() !== ""
+  ) {
+    return String(column.text).trim();
+  }
+
+  return "";
+}
+
+function getFormulaValue(item, columnId) {
+  const column = getColumn(item, columnId);
+
+  if (!column) {
+    return "";
+  }
+
+  if (
+    column.display_value !== null &&
+    column.display_value !== undefined &&
+    String(column.display_value).trim() !== ""
+  ) {
+    return String(column.display_value).trim();
+  }
+
+  if (
+    column.text !== null &&
+    column.text !== undefined &&
+    String(column.text).trim() !== ""
+  ) {
+    return String(column.text).trim();
+  }
+
+  return "";
+}
+
+function getMirrorValue(item, columnId) {
+  const column = getColumn(item, columnId);
+
+  if (!column) {
+    return "";
+  }
+
+  if (
+    column.display_value !== null &&
+    column.display_value !== undefined
+  ) {
+    if (Array.isArray(column.display_value)) {
+      return column.display_value
+        .map((value) => {
+          if (value === null || value === undefined) {
+            return "";
+          }
+
+          if (typeof value === "object") {
+            return (
+              value.display_value ||
+              value.name ||
+              value.text ||
+              value.value ||
+              ""
+            );
+          }
+
+          return String(value);
+        })
+        .filter(Boolean)
+        .join(", ")
+        .trim();
+    }
+
+    if (typeof column.display_value === "object") {
+      return String(
+        column.display_value.display_value ||
+          column.display_value.name ||
+          column.display_value.text ||
+          column.display_value.value ||
+          ""
+      ).trim();
+    }
+
+    const displayValue =
+      String(column.display_value).trim();
+
+    if (displayValue) {
+      return displayValue;
+    }
+  }
+
+  if (
+    column.text !== null &&
+    column.text !== undefined &&
+    String(column.text).trim() !== ""
+  ) {
+    return String(column.text).trim();
+  }
+
+  return "";
+}
+
+function getLinkedItemName(item, columnId) {
+  const column = getColumn(item, columnId);
+
+  if (!column) {
+    return "";
+  }
+
+  if (
+    Array.isArray(column.linked_item_ids) &&
+    column.linked_item_ids.length &&
+    Array.isArray(column.linked_items) &&
+    column.linked_items.length
+  ) {
+    return column.linked_items
+      .map((linkedItem) => linkedItem.name || "")
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  if (
+    Array.isArray(column.linked_items) &&
+    column.linked_items.length
+  ) {
+    return column.linked_items
+      .map((linkedItem) => linkedItem.name || "")
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  if (
+    column.display_value !== null &&
+    column.display_value !== undefined
+  ) {
+    if (Array.isArray(column.display_value)) {
+      return column.display_value
+        .map((value) => {
+          if (typeof value === "object") {
+            return value.name || value.display_value || "";
+          }
+
+          return String(value || "");
+        })
+        .filter(Boolean)
+        .join(", ");
+    }
+
+    const displayValue =
+      String(column.display_value).trim();
+
+    if (displayValue) {
+      return displayValue;
+    }
+  }
+
+  return getBasicText(item, columnId);
 }
 
 function parseNumber(value) {
-  if (value === null || value === undefined) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
     return 0;
   }
 
-  const cleaned = String(value)
+  let raw = value;
+
+  if (Array.isArray(raw)) {
+    raw = raw[0];
+  }
+
+  if (
+    typeof raw === "object" &&
+    raw !== null
+  ) {
+    raw =
+      raw.display_value ??
+      raw.value ??
+      raw.text ??
+      0;
+  }
+
+  const cleaned = String(raw)
     .replace(/£/g, "")
     .replace(/,/g, "")
+    .replace(/\s/g, "")
     .trim();
 
   const number = Number(cleaned);
@@ -158,9 +348,18 @@ function today() {
     .slice(0, 10);
 }
 
-// ============================================================
-// READ JOB FROM MONDAY
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| READ MONDAY JOB
+|--------------------------------------------------------------------------
+|
+| Important:
+|
+| FormulaValue, MirrorValue and BoardRelationValue are queried using
+| inline fragments so we can access their typed fields rather than
+| relying only on generic "text".
+|
+*/
 
 async function getJob(itemId) {
   const query = `
@@ -177,6 +376,25 @@ async function getJob(itemId) {
           id
           text
           value
+
+          ... on FormulaValue {
+            display_value
+          }
+
+          ... on MirrorValue {
+            display_value
+          }
+
+          ... on BoardRelationValue {
+            display_value
+
+            linked_item_ids
+
+            linked_items {
+              id
+              name
+            }
+          }
         }
 
         subitems {
@@ -187,6 +405,25 @@ async function getJob(itemId) {
             id
             text
             value
+
+            ... on FormulaValue {
+              display_value
+            }
+
+            ... on MirrorValue {
+              display_value
+            }
+
+            ... on BoardRelationValue {
+              display_value
+
+              linked_item_ids
+
+              linked_items {
+                id
+                name
+              }
+            }
           }
         }
       }
@@ -203,23 +440,29 @@ async function getJob(itemId) {
   if (
     !data ||
     !data.items ||
-    data.items.length === 0
+    !data.items.length
   ) {
     throw new Error(
-      `Monday item ${itemId} was not found`
+      `Monday item ${itemId} was not found.`
     );
   }
 
   return data.items[0];
 }
 
-// ============================================================
-// BUILD DOCUMENT DATA
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| BUILD DOCUMENT DATA
+|--------------------------------------------------------------------------
+*/
 
 function buildDocumentData(item) {
   const reference =
-    getColumnText(
+    getFormulaValue(
+      item,
+      OUR_REFERENCE_COLUMN_ID
+    ) ||
+    getBasicText(
       item,
       OUR_REFERENCE_COLUMN_ID
     ) ||
@@ -227,75 +470,143 @@ function buildDocumentData(item) {
     item.id;
 
   const customerPO =
-    getColumnText(
+    getBasicText(
       item,
       CUSTOMER_PO_COLUMN_ID
+    ) || "";
+
+  const lines =
+    (item.subitems || []).map(
+      (subitem) => {
+        /*
+        |--------------------------------------------------------------------------
+        | RATE
+        |--------------------------------------------------------------------------
+        |
+        | This is a Connect Boards column.
+        | We want the NAME of the linked Rates-board item.
+        |
+        */
+
+        const rate =
+          getLinkedItemName(
+            subitem,
+            RATE_COLUMN_ID
+          ) ||
+          subitem.name ||
+          "";
+
+        /*
+        |--------------------------------------------------------------------------
+        | DESCRIPTION
+        |--------------------------------------------------------------------------
+        |
+        | Mirror from the Rates board.
+        |
+        */
+
+        const description =
+          getMirrorValue(
+            subitem,
+            DESCRIPTION_COLUMN_ID
+          ) || "";
+
+        /*
+        |--------------------------------------------------------------------------
+        | QUANTITY
+        |--------------------------------------------------------------------------
+        */
+
+        const quantity =
+          parseNumber(
+            getBasicText(
+              subitem,
+              QUANTITY_COLUMN_ID
+            )
+          );
+
+        /*
+        |--------------------------------------------------------------------------
+        | PRICE
+        |--------------------------------------------------------------------------
+        |
+        | First use formula_mm7eqee4.
+        |
+        | Live Monday inspection confirmed this currently resolves:
+        |
+        | 2 Way Signals       -> 425
+        | TM Plan Same Day    -> 50
+        | TTRO                -> 0
+        | Large Road Closure  -> 800
+        |
+        | If the formula ever fails, fall back to the mirrored Price.
+        |
+        */
+
+        let price =
+          parseNumber(
+            getFormulaValue(
+              subitem,
+              PRICE_FORMULA_COLUMN_ID
+            )
+          );
+
+        if (!price) {
+          price =
+            parseNumber(
+              getMirrorValue(
+                subitem,
+                PRICE_MIRROR_COLUMN_ID
+              )
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | TOTAL
+        |--------------------------------------------------------------------------
+        |
+        | Use Monday's Total formula first.
+        |
+        | If it isn't available through the API, calculate Qty x Price.
+        |
+        */
+
+        let total =
+          parseNumber(
+            getFormulaValue(
+              subitem,
+              TOTAL_COLUMN_ID
+            )
+          );
+
+        if (
+          total === 0 &&
+          quantity !== 0 &&
+          price !== 0
+        ) {
+          total =
+            quantity * price;
+        }
+
+        return {
+          id: subitem.id,
+          rate,
+          description,
+          quantity,
+          price,
+          total,
+        };
+      }
     );
 
-  const lines = (
-    item.subitems || []
-  ).map((subitem) => {
-    const rate =
-      getColumnText(
-        subitem,
-        RATE_COLUMN_ID
-      ) ||
-      subitem.name ||
-      "";
-
-    const description =
-      getColumnText(
-        subitem,
-        DESCRIPTION_COLUMN_ID
-      );
-
-    const quantity =
-      parseNumber(
-        getColumnText(
-          subitem,
-          QUANTITY_COLUMN_ID
-        )
-      );
-
-    const price =
-      parseNumber(
-        getColumnText(
-          subitem,
-          PRICE_COLUMN_ID
-        )
-      );
-
-    let total =
-      parseNumber(
-        getColumnText(
-          subitem,
-          TOTAL_COLUMN_ID
-        )
-      );
-
-    if (
-      total === 0 &&
-      quantity !== 0 &&
-      price !== 0
-    ) {
-      total = quantity * price;
-    }
-
-    return {
-      id: subitem.id,
-      rate,
-      description,
-      quantity,
-      price,
-      total,
-    };
-  });
-
-  const total = lines.reduce(
-    (sum, line) =>
-      sum + Number(line.total || 0),
-    0
-  );
+  const total =
+    lines.reduce(
+      (sum, line) =>
+        sum +
+        Number(line.total || 0),
+      0
+    );
 
   return {
     itemId: item.id,
@@ -308,9 +619,11 @@ function buildDocumentData(item) {
   };
 }
 
-// ============================================================
-// PDF GENERATOR
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| PDF GENERATOR
+|--------------------------------------------------------------------------
+*/
 
 function renderDocument(
   data,
@@ -329,18 +642,16 @@ function renderDocument(
 
         doc.on(
           "data",
-          (chunk) => {
-            chunks.push(chunk);
-          }
+          (chunk) =>
+            chunks.push(chunk)
         );
 
         doc.on(
           "end",
-          () => {
+          () =>
             resolve(
               Buffer.concat(chunks)
-            );
-          }
+            )
         );
 
         doc.on(
@@ -353,7 +664,11 @@ function renderDocument(
             ? "QUOTATION"
             : "INVOICE";
 
-        // HEADER
+        /*
+        |--------------------------------------------------------------------------
+        | HEADER
+        |--------------------------------------------------------------------------
+        */
 
         doc
           .font("Helvetica-Bold")
@@ -411,7 +726,11 @@ function renderDocument(
             }
           );
 
-        // JOB DETAILS
+        /*
+        |--------------------------------------------------------------------------
+        | JOB DETAILS
+        |--------------------------------------------------------------------------
+        */
 
         doc.moveDown(4);
 
@@ -441,13 +760,17 @@ function renderDocument(
 
         doc.moveDown(1.5);
 
-        // TABLE
+        /*
+        |--------------------------------------------------------------------------
+        | TABLE
+        |--------------------------------------------------------------------------
+        */
 
         const xRate = 45;
-        const xDescription = 165;
-        const xQty = 380;
-        const xPrice = 425;
-        const xTotal = 495;
+        const xDescription = 170;
+        const xQty = 385;
+        const xPrice = 430;
+        const xTotal = 500;
 
         let y = doc.y;
 
@@ -460,7 +783,7 @@ function renderDocument(
           xRate,
           y,
           {
-            width: 110,
+            width: 115,
           }
         );
 
@@ -469,7 +792,7 @@ function renderDocument(
           xDescription,
           y,
           {
-            width: 205,
+            width: 200,
           }
         );
 
@@ -498,7 +821,7 @@ function renderDocument(
           xTotal,
           y,
           {
-            width: 65,
+            width: 60,
             align: "right",
           }
         );
@@ -519,13 +842,13 @@ function renderDocument(
         for (
           const line of data.lines
         ) {
-          const rowHeight = 60;
+          const rowHeight = 55;
 
           if (
-            y + rowHeight > 720
+            y + rowHeight >
+            730
           ) {
             doc.addPage();
-
             y = 50;
           }
 
@@ -534,7 +857,7 @@ function renderDocument(
             xRate,
             y,
             {
-              width: 110,
+              width: 115,
             }
           );
 
@@ -543,7 +866,7 @@ function renderDocument(
             xDescription,
             y,
             {
-              width: 205,
+              width: 200,
             }
           );
 
@@ -560,9 +883,7 @@ function renderDocument(
           );
 
           doc.text(
-            money(
-              line.price
-            ),
+            money(line.price),
             xPrice,
             y,
             {
@@ -572,13 +893,11 @@ function renderDocument(
           );
 
           doc.text(
-            money(
-              line.total
-            ),
+            money(line.total),
             xTotal,
             y,
             {
-              width: 65,
+              width: 60,
               align: "right",
             }
           );
@@ -586,7 +905,11 @@ function renderDocument(
           y += rowHeight;
         }
 
-        // TOTAL
+        /*
+        |--------------------------------------------------------------------------
+        | TOTAL
+        |--------------------------------------------------------------------------
+        */
 
         y += 10;
 
@@ -616,7 +939,11 @@ function renderDocument(
           }
         );
 
-        // FOOTER
+        /*
+        |--------------------------------------------------------------------------
+        | FOOTER
+        |--------------------------------------------------------------------------
+        */
 
         doc
           .font("Helvetica")
@@ -642,9 +969,11 @@ function renderDocument(
   );
 }
 
-// ============================================================
-// UPLOAD FILE TO MONDAY
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| UPLOAD PDF TO MONDAY
+|--------------------------------------------------------------------------
+*/
 
 async function uploadFileToMonday(
   itemId,
@@ -660,7 +989,9 @@ async function uploadFileToMonday(
   const query = `
     mutation ($file: File!) {
       add_file_to_column(
-        item_id: ${Number(itemId)},
+        item_id: ${Number(
+          itemId
+        )},
         column_id: "${columnId}",
         file: $file
       ) {
@@ -714,9 +1045,11 @@ async function uploadFileToMonday(
   return response.data;
 }
 
-// ============================================================
-// UPDATE MONDAY AFTER GENERATION
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| UPDATE JOB MASTER
+|--------------------------------------------------------------------------
+*/
 
 async function updateJobAfterGeneration(
   itemId,
@@ -724,6 +1057,12 @@ async function updateJobAfterGeneration(
   documentType,
   total
 ) {
+  if (!boardId) {
+    throw new Error(
+      "Unable to determine Monday board ID."
+    );
+  }
+
   const columnValues =
     documentType === "quote"
       ? {
@@ -788,9 +1127,11 @@ async function updateJobAfterGeneration(
   );
 }
 
-// ============================================================
-// GENERATE DOCUMENT
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| GENERATE QUOTE / INVOICE
+|--------------------------------------------------------------------------
+*/
 
 async function generateDocument(
   itemId,
@@ -811,12 +1152,28 @@ async function generateDocument(
   const data =
     buildDocumentData(item);
 
+  if (!data.lines.length) {
+    throw new Error(
+      "No rate subitems were found for this job."
+    );
+  }
+
+  /*
+   * Safety check.
+   *
+   * Prevent creation of a £0 document if
+   * Monday's rate data fails to resolve.
+   */
+
   if (
-    !data.lines ||
-    data.lines.length === 0
+    data.total === 0 &&
+    data.lines.some(
+      (line) =>
+        line.quantity > 0
+    )
   ) {
     throw new Error(
-      "No subitems were found for this job"
+      "Document total resolved to £0. Generation stopped to prevent an incorrect document."
     );
   }
 
@@ -826,7 +1183,7 @@ async function generateDocument(
       documentType
     );
 
-  const filesColumnId =
+  const columnId =
     documentType === "quote"
       ? QUOTE_FILES_COLUMN_ID
       : INVOICE_FILES_COLUMN_ID;
@@ -837,9 +1194,7 @@ async function generateDocument(
       : "Invoice";
 
   const safeReference =
-    String(
-      data.reference
-    )
+    String(data.reference)
       .replace(
         /[^\w\-]+/g,
         "_"
@@ -854,7 +1209,7 @@ async function generateDocument(
 
   await uploadFileToMonday(
     itemId,
-    filesColumnId,
+    columnId,
     filename,
     pdfBuffer
   );
@@ -879,9 +1234,11 @@ async function generateDocument(
   };
 }
 
-// ============================================================
-// HOME
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| ROOT / HEALTH
+|--------------------------------------------------------------------------
+*/
 
 app.get(
   "/",
@@ -894,10 +1251,6 @@ app.get(
   }
 );
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
-
 app.get(
   "/health",
   (req, res) => {
@@ -909,9 +1262,18 @@ app.get(
   }
 );
 
-// ============================================================
-// READ-ONLY MONDAY TEST
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| READ-ONLY TEST
+|--------------------------------------------------------------------------
+|
+| This endpoint DOES NOT:
+|
+| - create a PDF
+| - upload a file
+| - modify Monday
+|
+*/
 
 app.get(
   "/test/:itemId",
@@ -929,16 +1291,22 @@ app.get(
 
       res.json({
         ok: true,
+
         itemId:
           data.itemId,
+
         jobName:
           data.jobName,
+
         reference:
           data.reference,
+
         customerPO:
           data.customerPO,
+
         lines:
           data.lines,
+
         total:
           data.total,
       });
@@ -959,14 +1327,40 @@ app.get(
   }
 );
 
-// ============================================================
-// MANUAL DOCUMENT GENERATION
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| MANUAL GENERATION
+|--------------------------------------------------------------------------
+*/
 
 app.post(
   "/generate",
   async (req, res) => {
     try {
+      /*
+       * Protect this write endpoint.
+       */
+
+      const suppliedSecret =
+        req.query.secret ||
+        req.headers[
+          "x-webhook-secret"
+        ];
+
+      if (
+        WEBHOOK_SECRET &&
+        suppliedSecret !==
+          WEBHOOK_SECRET
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Invalid webhook secret",
+          });
+      }
+
       const {
         itemId,
         documentType,
@@ -1003,16 +1397,14 @@ app.post(
           documentType
         );
 
-      return res.json(
-        result
-      );
+      res.json(result);
     } catch (error) {
       console.error(
-        "Generate failed:",
+        "Generate error:",
         error.message
       );
 
-      return res
+      res
         .status(500)
         .json({
           ok: false,
@@ -1023,27 +1415,29 @@ app.post(
   }
 );
 
-// ============================================================
-// MONDAY WEBHOOK
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| MONDAY DOCUMENT WEBHOOK
+|--------------------------------------------------------------------------
+*/
 
 app.post(
   "/monday/document",
   async (req, res) => {
     try {
-      // Monday verification challenge
+      /*
+       * Monday verification challenge must
+       * be handled before secret validation.
+       */
 
       if (
-        req.body &&
-        req.body.challenge
+        req.body?.challenge
       ) {
         return res.json({
           challenge:
             req.body.challenge,
         });
       }
-
-      // Optional webhook secret
 
       const suppliedSecret =
         req.query.secret ||
@@ -1066,8 +1460,7 @@ app.post(
       }
 
       const event =
-        req.body?.event ||
-        {};
+        req.body?.event || {};
 
       const itemId =
         event.pulseId ||
@@ -1080,17 +1473,15 @@ app.post(
           .json({
             ok: false,
             error:
-              "No Monday item ID received",
+              "No Monday item ID received.",
           });
       }
 
       const item =
-        await getJob(
-          itemId
-        );
+        await getJob(itemId);
 
       const billing =
-        getColumnText(
+        getBasicText(
           item,
           BILLING_COLUMN_ID
         );
@@ -1117,7 +1508,10 @@ app.post(
         });
       }
 
-      // Acknowledge webhook first
+      /*
+       * Respond to Monday before
+       * performing PDF generation.
+       */
 
       res.json({
         ok: true,
@@ -1126,8 +1520,6 @@ app.post(
           String(itemId),
         documentType,
       });
-
-      // Generate asynchronously
 
       generateDocument(
         itemId,
@@ -1142,7 +1534,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        "Webhook failed:",
+        "Webhook error:",
         error.message
       );
 
@@ -1161,17 +1553,22 @@ app.post(
   }
 );
 
-// ============================================================
-// LEGACY INVOICE ENDPOINT
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| LEGACY INVOICE ENDPOINT
+|--------------------------------------------------------------------------
+*/
 
 app.post(
   "/monday/invoice",
   async (req, res) => {
     try {
+      /*
+       * Monday challenge first.
+       */
+
       if (
-        req.body &&
-        req.body.challenge
+        req.body?.challenge
       ) {
         return res.json({
           challenge:
@@ -1212,7 +1609,7 @@ app.post(
           .json({
             ok: false,
             error:
-              "No Monday item ID received",
+              "No Monday item ID received.",
           });
       }
 
@@ -1238,7 +1635,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        "Legacy invoice webhook failed:",
+        "Invoice webhook error:",
         error.message
       );
 
@@ -1257,12 +1654,19 @@ app.post(
   }
 );
 
-// ============================================================
-// ERROR HANDLER
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| ERROR HANDLER
+|--------------------------------------------------------------------------
+*/
 
 app.use(
-  (err, req, res, next) => {
+  (
+    err,
+    req,
+    res,
+    next
+  ) => {
     console.error(
       "Unhandled application error:",
       err
@@ -1284,10 +1688,15 @@ app.use(
   }
 );
 
-// ============================================================
-// START SERVER
-// IMPORTANT: THIS IS THE ONLY app.listen() IN THIS FILE
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| START SERVER
+|--------------------------------------------------------------------------
+|
+| IMPORTANT:
+| There is ONE app.listen() only.
+|
+*/
 
 app.listen(
   PORT,
